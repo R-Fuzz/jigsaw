@@ -1,6 +1,15 @@
-#JIGSAW: Just-in-Time Gradient descent Search for Answers
+# Remote Gradient Descent Searcher
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+## To replay expressions from file
 
-JIGSAW is a fuzzing-based path constraint solver.
+**Reply from constraints files**
+```
+./rgd num_of_threads pin_core_start solver_select generate_output test_dir
+```
+
+**To start server**
+```
+./rgds num_of_threads pin_core_start is_z3
+```
+
 
