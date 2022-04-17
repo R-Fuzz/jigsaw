@@ -1927,6 +1927,7 @@ void* rgdTask(void *threadarg) {
           for (int i = 0 ; i< cmd->expr_string_size();i++) {
             JitRequest* req = cmd->add_expr();
             CodedInputStream s((uint8_t*)cmd->expr_string(i).c_str(), cmd->expr_string(i).size()); 
+            s.SetRecursionLimit(100);
             //req->ParseFromString(cmd->expr_string(i));
             req->ParseFromCodedStream(&s);
           }
