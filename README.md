@@ -1,15 +1,32 @@
-# Remote Gradient Descent Searcher
+# JIGSAW
 
-## To replay expressions from file
+**Build**
+```
+mkdir build 
+cd build && make
+```
 
-**Reply from constraints files**
+**Using Docker**
+
 ```
-./rgd num_of_threads pin_core_start solver_select generate_output test_dir
+docker build -t jigsaw-test .
+
+# copy constraints files to /out/readelf inside the container
+docker run jigsaw-test /src/jigsaw/build/rgd 1 0 0 0 0 /out/readelf
 ```
 
-**To start server**
+**Replay from constraints files**
 ```
-./rgds num_of_threads pin_core_start is_z3
+Command:
+./rgd num_of_threads pin_core_start test_dir
+
+Example:
+# solve objdump constraints using 8 cores, starting from core 0
+./rgd 8 0 objdump 
 ```
+
+**Constraints Files**
+
+https://drive.google.com/drive/folders/1fxSvKI7C3c2mLqcGN9H1RJ1aHkeKEVxQ
 
 
