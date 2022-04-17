@@ -394,7 +394,8 @@ static void mapArgs(JitRequest* req,
   uint32_t bits = req->bits();
   uint32_t kind = req->kind();
   XXH32_update(&state, &bits, sizeof(bits));
-  XXH32_update(&state, &kind, sizeof(kind));
+  if (req->kind() < rgd::Equal || req->kind() > rgd::Sge)
+    XXH32_update(&state, &kind, sizeof(kind));
   if (req->kind() == rgd::Constant) {
     uint32_t start = (uint32_t)constraint->input_args.size();
     req->set_index(start);  //save index
@@ -440,8 +441,6 @@ static void mapArgs(JitRequest* req,
     }
     req->set_hash(XXH32_digest(&state));
   }
-  //disable hash for top level comparison
-  if (req->kind() >= rgd::Equal && req->kind() <= rgd::Sge) req->set_hash(0);
 }
 
 
