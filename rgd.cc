@@ -196,12 +196,40 @@ struct nestHash {
     atomic_compare_and_swap(p, o, n);}
     };
 
+
+static inline uint32_t xxhash(uint32_t h1, uint32_t h2, uint32_t h3) {
+  const uint32_t PRIME32_1 = 2654435761U;
+  const uint32_t PRIME32_2 = 2246822519U;
+  const uint32_t PRIME32_3 = 3266489917U;
+  const uint32_t PRIME32_4 =  668265263U;
+  const uint32_t PRIME32_5 =  374761393U;
+
+#define XXH_rotl32(x,r) ((x << r) | (x >> (32 - r)))
+  uint32_t h32 = PRIME32_5;
+  h32 += h1 * PRIME32_3;
+  h32  = XXH_rotl32(h32, 17) * PRIME32_4;
+  h32 += h2 * PRIME32_3;
+  h32  = XXH_rotl32(h32, 17) * PRIME32_4;
+  h32 += h3 * PRIME32_3;
+  h32  = XXH_rotl32(h32, 17) * PRIME32_4;
+#undef XXH_rotl32
+
+  h32 ^= h32 >> 15;
+  h32 *= PRIME32_2;
+  h32 ^= h32 >> 13;
+  h32 *= PRIME32_3;
+  h32 ^= h32 >> 16;
+
+  return h32;
+}
+
 struct consHash {
   using eType = struct consKV*;
   using kType =	std::tuple<uint32_t,uint32_t,uint32_t>;
   eType empty() {return nullptr;}
   kType getKey(eType v) {return v->label;}
-  int hash(kType v) {return std::get<0>(v) ^ std::get<1>(v) ^ std::get<2>(v);} //hash64_2(v);}
+  //int hash(kType v) {return std::get<0>(v) ^ std::get<1>(v) ^ std::get<2>(v);} //hash64_2(v);}
+  int hash(kType v) { return xxhash(std::get<0>(v), std::get<1>(v), std::get<2>(v));} //hash64_2(v);}
   //int hash(kType v) {return hash64_2(v);}
   //int cmp(kType v, kType b) {return (v > b) ? 1 : ((v == b) ? 0 : -1);}
   int cmp(kType v, kType b) {return (std::get<0>(v) == std::get<0>(b) && std::get<1>(v) == std::get<1>(b) && std::get<2>(v) == std::get<2>(b)) ? 0 : -1;}
@@ -274,6 +302,7 @@ static std::atomic<uint64_t> solving_total;
 static std::atomic<uint64_t> parsing_total;
 static std::atomic<uint64_t> parsing1_total;
 static std::atomic<uint64_t> parsing2_total;
+static std::atomic<uint64_t> parsing_total3;
 static std::atomic<uint64_t> iterations_total;
 static std::atomic<uint64_t> gCmdIdx(0);
 }
@@ -1406,8 +1435,11 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
       return nullptr;
     }
 
-#if 0
+    //printf("adjust session id %d, label %d, kind %d\n", adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind());
+#if 1
+    uint64_t time2 = getTimeStamp();
     struct consKV *res1 = consCache.find({adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind()});
+    parsing_total3 += getTimeStamp() - time2;
     if (res1) {
       //printf("local hit %d\n", ++localhit);
       std::shared_ptr<Constraint> constraint1 = res1->cons;
@@ -1445,7 +1477,7 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
 
     assert(isRelational(adjusted_request->kind()) && "non-relational expr");
     fut->constraints.push_back(constraint);
-    //consCache.insert(new struct consKV({adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind()},constraint));
+    consCache.insert(new struct consKV({adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind()},constraint));
     //temp.insert({adjusted_request->sessionid()*1000000+adjusted_request->label()*100+adjusted_request->kind(), constraint});
   }
 
@@ -1808,7 +1840,7 @@ void* rgdTask(void *threadarg) {
     }
     if (gProcessed % 1000==0) {
       std::cout << "processed" << gProcessed << " constraints" << std::endl;
-      std::cout << "elapsed time is " << getTimeStamp() - start_time << " iter " << iterations_total << " solved " << gFi << std::endl;
+      std::cout << "elapsed time is " << getTimeStamp() - start_time <<  " cons cache lookup " << parsing_total3 << " iter " << iterations_total << " solved " << gFi << std::endl;
     }
 
 #if CHECK_DIS
