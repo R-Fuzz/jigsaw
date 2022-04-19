@@ -420,11 +420,12 @@ static void mapArgs(JitRequest* req,
   }
   XXH32_state_t state;
   XXH32_reset(&state,0);
+  uint32_t hash = 0;
   uint32_t bits = req->bits();
   uint32_t kind = req->kind();
-  XXH32_update(&state, &bits, sizeof(bits));
-  if (req->kind() < rgd::Equal || req->kind() > rgd::Sge)
-    XXH32_update(&state, &kind, sizeof(kind));
+  //XXH32_update(&state, &bits, sizeof(bits));
+  //if (req->kind() < rgd::Equal || req->kind() > rgd::Sge)
+    //XXH32_update(&state, &kind, sizeof(kind));
   if (req->kind() == rgd::Constant) {
     uint32_t start = (uint32_t)constraint->input_args.size();
     req->set_index(start);  //save index
@@ -434,8 +435,10 @@ static void mapArgs(JitRequest* req,
     constraint->input_args.push_back(std::make_pair(false,iv));
     constraint->const_num += 1;
     //build index by local index
-    XXH32_update(&state,&start,sizeof(start));
-    req->set_hash(XXH32_digest(&state));
+    //XXH32_update(&state,&start,sizeof(start));
+    //req->set_hash(XXH32_digest(&state));
+    hash = xxhash(bits, kind, start);
+    req->set_hash(hash);
   }
   else if (req->kind() == rgd::Read) {
     //search from current input
@@ -459,16 +462,24 @@ static void mapArgs(JitRequest* req,
         arg_index = itr->second;
       }
       //if (i==0) {
-      XXH32_update(&state,&arg_index,sizeof(arg_index));
-      req->set_hash(XXH32_digest(&state));
+      //XXH32_update(&state,&arg_index,sizeof(arg_index));
+      //req->set_hash(XXH32_digest(&state));
+
+      hash = xxhash(bits, kind, arg_index);
+      req->set_hash(hash);
       // }
     }
   } else {
+    if (req->kind() < rgd::Equal || req->kind() > rgd::Sge)
+    //XXH32_update(&state, &kind, sizeof(kind));
+      hash = xxhash(bits, kind, 0);
     for (int32_t i = 0; i < req->children_size(); i++) {
       uint32_t h = req->children(i).hash();
-      XXH32_update(&state,&h,sizeof(h));
+      //XXH32_update(&state,&h,sizeof(h));
+      hash = xxhash(hash, h, 0);
     }
-    req->set_hash(XXH32_digest(&state));
+    //req->set_hash(XXH32_digest(&state));
+    req->set_hash(hash);
   }
 }
 
@@ -1457,6 +1468,7 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
     mapArgs(adjusted_request,constraint,visited);
     std::shared_ptr<JitRequest> copied_req = std::make_shared<JitRequest>();
     copied_req->CopyFrom(*adjusted_request);
+
     struct myKV *res = fCache.find(copied_req);
     //		struct myKV *res = nullptr;
     if (res == nullptr) {
