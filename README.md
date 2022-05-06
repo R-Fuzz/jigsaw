@@ -12,7 +12,7 @@ cd build && make
 docker build -t jigsaw-test .
 
 # copy constraints files to /out/readelf inside the container
-docker run jigsaw-test /src/jigsaw/build/rgd 1 0 0 0 0 /out/readelf
+docker run jigsaw-test /src/jigsaw/build/rgd 1 0 /out/readelf
 ```
 
 **Replay from constraints files**
