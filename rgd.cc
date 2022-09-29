@@ -56,6 +56,7 @@
 #define XXH_STATIC_LINKING_ONLY
 #include "xxhash.h"
 #define DEBUG 0
+#define CONSTRAINT_CACHE 1
 #define CHECK_DIS 1
 #define CODEGEN_V2 1
 #define THREAD_POOL_SIZE 0
@@ -427,12 +428,12 @@ static void mapArgs(JitRequest* req,
   //if (req->kind() < rgd::Equal || req->kind() > rgd::Sge)
     //XXH32_update(&state, &kind, sizeof(kind));
   if (req->kind() == rgd::Constant) {
-    uint32_t start = (uint32_t)constraint->input_args.size();
+    uint32_t start = (uint32_t)constraint->input_args_scratch.size();
     req->set_index(start);  //save index
     llvm::StringRef ref(req->value());
     llvm::APInt value(req->bits(), ref, 10);
     uint64_t iv = value.getZExtValue();
-    constraint->input_args.push_back(std::make_pair(false,iv));
+    constraint->input_args_scratch.push_back(std::make_pair(false,iv));
     constraint->const_num += 1;
     //build index by local index
     //XXH32_update(&state,&start,sizeof(start));
@@ -454,10 +455,10 @@ static void mapArgs(JitRequest* req,
       uint32_t arg_index = 0;
       auto itr = constraint->local_map.find(offset);
       if ( itr == constraint->local_map.end()) {
-        arg_index = (uint32_t)constraint->input_args.size();
+        arg_index = (uint32_t)constraint->input_args_scratch.size();
         constraint->inputs.insert({offset,(uint8_t)(iv & 0xff)});
         constraint->local_map[offset] = arg_index;
-        constraint->input_args.push_back(std::make_pair(true,0)); // 0 is to be filled in the aggragation
+        constraint->input_args_scratch.push_back(std::make_pair(true,0)); // 0 is to be filled in the aggragation
       } else {
         arg_index = itr->second;
       }
@@ -1447,7 +1448,7 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
     }
 
     //printf("adjust session id %d, label %d, kind %d\n", adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind());
-#if 1
+#if CONSTRAINT_CACHE
     uint64_t time2 = getTimeStamp();
     struct consKV *res1 = consCache.find({adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind()});
     parsing_total3 += getTimeStamp() - time2;

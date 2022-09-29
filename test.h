@@ -17,12 +17,18 @@ public:
 	uint32_t comparison;
 
 	//map the offset to the idx in inputs_args
-	std::unordered_map<uint32_t,uint32_t> local_map;
 	// if const {false, const value}, if symbolic {true, index in the inputs}
-	std::vector<std::pair<bool, uint64_t>> input_args;
+	std::vector<std::pair<bool, uint64_t>> input_args_scratch;
+	std::unordered_map<uint32_t,uint32_t> local_map;
 	//map the offset to iv
 	std::unordered_map<uint32_t,uint8_t> inputs;
 	uint32_t const_num;
+};
+
+
+class ConsMeta {
+public:
+	std::vector<std::pair<bool, uint64_t>> input_args_final;
   uint32_t index;
 };
 
@@ -31,6 +37,7 @@ struct FUT {
 	~FUT() { if (scratch_args) free(scratch_args); }
 	uint32_t num_exprs;
 	std::vector<std::shared_ptr<Constraint>> constraints;
+  std::vector<std::shared_ptr<ConsMeta>> constraintsmeta;
 
 	// offset and input value
 	std::vector<std::pair<uint32_t,uint8_t>> inputs;
@@ -49,7 +56,7 @@ struct FUT {
   std::vector<uint64_t> distances;
 	uint64_t* scratch_args;
 
-  std::unordered_map<uint32_t, std::vector<std::shared_ptr<Constraint>>> cmap;
+  std::unordered_map<uint32_t, std::vector<uint32_t>> cmap;
 	//void allocate_scratch_args(int size) {scratch_args = (uint8_t*)aligned_alloc(64,size);}
 	void finalize() {
 	  //aggregate the contraints, fill input_args's index, build global inputs
@@ -57,7 +64,9 @@ struct FUT {
 		std::unordered_map<uint32_t,uint32_t> sym_map;
 		uint32_t gidx = 0;
 		for (size_t i =0; i< constraints.size(); i++) {
-      constraints[i]->index = i;
+      std::shared_ptr<ConsMeta> meta = std::make_shared<ConsMeta>();
+      meta->index = i;
+      meta->input_args_final = constraints[i]->input_args_scratch;
 			for (auto itr : constraints[i]->local_map) {
 				auto gitr = sym_map.find(itr.first);
 				if (gitr == sym_map.end()) {
@@ -66,10 +75,10 @@ struct FUT {
 					inputs.push_back(std::make_pair(itr.first,constraints[i]->inputs[itr.first]));
           auto slot = cmap.find(gidx);
           if (slot != cmap.end()) {
-            slot->second.push_back(constraints[i]);
+            slot->second.push_back(i);
           } else {
-            std::vector<std::shared_ptr<Constraint>> a;
-            a.push_back(constraints[i]);
+            std::vector<uint32_t> a;
+            a.push_back(i);
             cmap.insert({gidx, a});
           }
           //cmap[gidx].push_back(constraints[i]);
@@ -77,18 +86,18 @@ struct FUT {
 					gidx = gitr->second;
           auto slot = cmap.find(gidx);
           if (slot != cmap.end()) {
-            slot->second.push_back(constraints[i]);
+            slot->second.push_back(i);
           } else {
-            std::vector<std::shared_ptr<Constraint>> a;
-            a.push_back(constraints[i]);
+            std::vector<uint32_t> a;
+            a.push_back(i);
             //cmap.insert({gidx, a});
             cmap[gidx] = a;
           }
           //cmap[gidx].push_back(constraints[i]);
 				}
-				constraints[i]->input_args[itr.second].second = gidx;  //update input_args
-        
+				meta->input_args_final[itr.second].second = gidx;  //update input_args
 			}
+      constraintsmeta.push_back(meta);
 		}
 
 		

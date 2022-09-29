@@ -87,9 +87,9 @@ uint64_t getDistance(uint32_t comp, uint64_t a, uint64_t b) {
 
 void single_distance(MutInput &input, struct FUT* fut, int index) {
   uint64_t cur = 0;
-  for(std::shared_ptr<Constraint> c : fut->cmap[index]) {
+  for(uint32_t cons_id : fut->cmap[index]) {
     int arg_idx = 0;	
-    for (auto arg : c->input_args) {
+    for (auto arg : fut->constraintsmeta[cons_id]->input_args_final) {
       if (arg.first) {// symbolic
         fut->scratch_args[2+arg_idx] = (uint64_t)input.value[arg.second];
       }
@@ -98,9 +98,9 @@ void single_distance(MutInput &input, struct FUT* fut, int index) {
       }
       ++arg_idx;
     }
-    cur = (uint64_t)c->fn(fut->scratch_args);
-    uint64_t dis = getDistance(c->comparison,fut->scratch_args[0],fut->scratch_args[1]);
-    fut->distances[c->index] = dis;
+    cur = (uint64_t)fut->constraints[cons_id]->fn(fut->scratch_args);
+    uint64_t dis = getDistance(fut->constraints[cons_id]->comparison,fut->scratch_args[0],fut->scratch_args[1]);
+    fut->distances[fut->constraintsmeta[cons_id]->index] = dis;
   }
 }
 
@@ -117,7 +117,7 @@ uint64_t distance(MutInput &input, struct FUT* fut) {
     //mapping symbolic args
     int arg_idx = 0;	
     std::shared_ptr<Constraint> c = fut->constraints[i];
-    for (auto arg : c->input_args) {
+    for (auto arg : fut->constraintsmeta[i]->input_args_final) {
       if (arg.first) {// symbolic
         fut->scratch_args[2+arg_idx] = (uint64_t)input.value[arg.second];
       }
