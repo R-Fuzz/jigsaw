@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.5.1)
 
 project(rgd C CXX)
 
-set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -g -std=c++14 -mcx16 -march=native -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free")
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -g -std=c++17 -mcx16 -march=native -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free")
 set(CMAKE_TEST_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/test) 
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O2 -fPIC -Wall -Wextra -std=c++11")
   
@@ -48,6 +48,7 @@ add_library(gd
 
 add_executable(rgd
   rgd.cc
+  jit.cc
 	util.cc
   xxhash.cc
   ${rgd_proto_srcs})

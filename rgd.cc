@@ -18,31 +18,16 @@
 #include <boost/asio.hpp>
 #include <boost/thread/thread_pool.hpp>
 #include <gperftools/profiler.h>
+#include <google/protobuf/io/zero_copy_stream_impl.h>
+#include <boost/filesystem.hpp>
 
-#include "llvm/ADT/APFloat.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/IR/DerivedTypes.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/Type.h"
-#include "llvm/IR/Verifier.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
-#include "llvm/Transforms/InstCombine/InstCombine.h"
-#include "llvm/Transforms/Scalar.h"
-#include "llvm/Transforms/Scalar/GVN.h"
-#include <google/protobuf/io/zero_copy_stream_impl.h>
-
-#include <boost/filesystem.hpp>
 
 #include "rgdJit.h"
 #include "ctpl.h"
 #include "rgd_op.h"
+#include "jit.h"
 #include "wheels/lockfreehash/lprobe/hash_table.h"
 #include "wheels/concurrentqueue/queue.h"
 #include "util.h"
@@ -57,13 +42,14 @@
 #include "xxhash.h"
 #define DEBUG 0
 #define CONSTRAINT_CACHE 1
-#define CHECK_DIS 1
+#define CHECK_DIS 0
 #define CODEGEN_V2 1
 #define THREAD_POOL_SIZE 0
 #define SINGLE_BRANCH 0
 #define NESTED_BRANCH 1
 #define LOADING_LIMIT 1000000
 #define PROCESSING_LIMIT 1000000
+
 using namespace pbbs;
 using namespace llvm;
 using namespace llvm::orc;
@@ -75,9 +61,8 @@ int core_start = 0;
 //llvm::orc::ThreadSafeContext TSCtx(llvm::make_unique<llvm::LLVMContext>());
 //inline llvm::LLVMContext& getContext() { return *TSCtx.getContext(); }
 //std::unique_ptr<llvm::Module> TheModule;
-std::unique_ptr<GradJit> JIT;// = make_unique<GradJit>();
+extern std::unique_ptr<GradJit> JIT;// = make_unique<GradJit>();
 uint64_t getTimeStamp();
-void printExpression(const JitRequest* req);
 uint64_t start_time;
 
 uint8_t input_buffer[64][8092];
@@ -85,42 +70,10 @@ uint8_t input_buffer[64][8092];
 bool gd_entry(struct FUT* dut);
 
 namespace rgd {
-  //ugly implementation for expressions
-#if CODEGEN_V2
-  bool recursive_equal(const JitRequest& lhs, const JitRequest& rhs) {
-    if ((lhs.kind() >= rgd::Ult && lhs.kind() <= rgd::Uge) && 
-        (rhs.kind() >= rgd::Ult && rhs.kind() <= rgd::Uge)) {
-      const int children_size = lhs.children_size();
-      if (children_size != rhs.children_size()) return false;
-      for (int i = 0; i < children_size; i++) {
-        if (!recursive_equal(lhs.children(i), rhs.children(i)))
-          return false;
-      }
-      return true;
-    }
-    if ((lhs.kind() >= rgd::Slt && lhs.kind() <= rgd::Sge) && 
-        (rhs.kind() >= rgd::Slt && rhs.kind() <= rgd::Sge)) {
-      const int children_size = lhs.children_size();
-      if (children_size != rhs.children_size()) return false;
-      for (int i = 0; i < children_size; i++) {
-        if (!recursive_equal(lhs.children(i), rhs.children(i)))
-          return false;
-      }
-      return true;
-    }
-    if ((lhs.kind() >= rgd::Equal && lhs.kind() <= rgd::Distinct) && 
-        (rhs.kind() >= rgd::Equal && rhs.kind() <= rgd::Distinct)) {
-      const int children_size = lhs.children_size();
-      if (children_size != rhs.children_size()) return false;
-      for (int i = 0; i < children_size; i++) {
-        if (!recursive_equal(lhs.children(i), rhs.children(i)))
-          return false;
-      }
-      return true;
-    }
-    if (lhs.hash() != rhs.hash()) return false;
-    if (lhs.kind() != rhs.kind()) return false;
-    if (lhs.bits() != rhs.bits()) return false;
+
+bool recursive_equal(const JitRequest& lhs, const JitRequest& rhs) {
+  if ((lhs.kind() >= rgd::Ult && lhs.kind() <= rgd::Uge) && 
+      (rhs.kind() >= rgd::Ult && rhs.kind() <= rgd::Uge)) {
     const int children_size = lhs.children_size();
     if (children_size != rhs.children_size()) return false;
     for (int i = 0; i < children_size; i++) {
@@ -129,11 +82,8 @@ namespace rgd {
     }
     return true;
   }
-#else
-  bool recursive_equal(const JitRequest& lhs, const JitRequest& rhs) {
-    if (lhs.hash() != rhs.hash()) return false;
-    if (lhs.kind() != rhs.kind()) return false;
-    if (lhs.bits() != rhs.bits()) return false;
+  if ((lhs.kind() >= rgd::Slt && lhs.kind() <= rgd::Sge) && 
+      (rhs.kind() >= rgd::Slt && rhs.kind() <= rgd::Sge)) {
     const int children_size = lhs.children_size();
     if (children_size != rhs.children_size()) return false;
     for (int i = 0; i < children_size; i++) {
@@ -142,44 +92,62 @@ namespace rgd {
     }
     return true;
   }
-#endif
-
-  bool isEqual(const JitRequest& lhs, const JitRequest& rhs) {
-    return recursive_equal(lhs, rhs);
+  if ((lhs.kind() >= rgd::Equal && lhs.kind() <= rgd::Distinct) && 
+      (rhs.kind() >= rgd::Equal && rhs.kind() <= rgd::Distinct)) {
+    const int children_size = lhs.children_size();
+    if (children_size != rhs.children_size()) return false;
+    for (int i = 0; i < children_size; i++) {
+      if (!recursive_equal(lhs.children(i), rhs.children(i)))
+        return false;
+    }
+    return true;
   }
+  if (lhs.hash() != rhs.hash()) return false;
+  if (lhs.kind() != rhs.kind()) return false;
+  if (lhs.bits() != rhs.bits()) return false;
+  const int children_size = lhs.children_size();
+  if (children_size != rhs.children_size()) return false;
+  for (int i = 0; i < children_size; i++) {
+    if (!recursive_equal(lhs.children(i), rhs.children(i)))
+      return false;
+  }
+  return true;
+}
 
-  struct myKV {
-    std::shared_ptr<JitRequest> req;
-    test_fn_type fn;
-    myKV(std::shared_ptr<JitRequest> areq, test_fn_type f) : req(areq), fn(f) {}
-  };
+bool isEqual(const JitRequest& lhs, const JitRequest& rhs) {
+  return recursive_equal(lhs, rhs);
+}
 
-  struct nestKV {
-    uint32_t label;
-    std::shared_ptr<JitRequest> req;
-    nestKV(uint32_t l, std::shared_ptr<JitRequest> areq) : label(l), req(areq) {}
-  };
+struct myKV {
+  std::shared_ptr<JitRequest> req;
+  test_fn_type fn;
+  myKV(std::shared_ptr<JitRequest> areq, test_fn_type f) : req(areq), fn(f) {}
+};
 
-  struct consKV {
-    std::tuple<uint32_t,uint32_t,uint32_t> label;
-    std::shared_ptr<Constraint> cons;
-    consKV(std::tuple<uint32_t,uint32_t,uint32_t> l, std::shared_ptr<Constraint> acon) : label(l), cons(acon) {}
-  };
+struct nestKV {
+  uint32_t label;
+  std::shared_ptr<JitRequest> req;
+  nestKV(uint32_t l, std::shared_ptr<JitRequest> areq) : label(l), req(areq) {}
+};
 
+struct consKV {
+  std::tuple<uint32_t,uint32_t,uint32_t> label;
+  std::shared_ptr<Constraint> cons;
+  consKV(std::tuple<uint32_t,uint32_t,uint32_t> l, std::shared_ptr<Constraint> acon) : label(l), cons(acon) {}
+};
 
-  struct myHash {
-    using eType = struct myKV*;
-    using kType = std::shared_ptr<JitRequest>;
-    eType empty() {return nullptr;}
-    kType getKey(eType v) {return v->req;}
-    int hash(kType v) {return v->hash();} //hash64_2(v);}
+struct myHash {
+  using eType = struct myKV*;
+  using kType = std::shared_ptr<JitRequest>;
+  eType empty() {return nullptr;}
+  kType getKey(eType v) {return v->req;}
+  int hash(kType v) {return v->hash();} //hash64_2(v);}
   //int hash(kType v) {return hash64_2(v);}
   //int cmp(kType v, kType b) {return (v > b) ? 1 : ((v == b) ? 0 : -1);}
   int cmp(kType v, kType b) {return (isEqual(*v,*b)) ? 0 : -1;}
   bool replaceQ(eType, eType) {return 0;}
   eType update(eType v, eType) {return v;}
-  bool cas(eType* p, eType o, eType n) {return
-    atomic_compare_and_swap(p, o, n);}
+  bool cas(eType* p, eType o, eType n) {return atomic_compare_and_swap(p, o, n);}
 };
 
 struct nestHash {
@@ -193,10 +161,8 @@ struct nestHash {
   int cmp(kType v, kType b) {return (v==b) ? 0 : -1;}
   bool replaceQ(eType, eType) {return 0;}
   eType update(eType v, eType) {return v;}
-  bool cas(eType* p, eType o, eType n) {return
-    atomic_compare_and_swap(p, o, n);}
-    };
-
+  bool cas(eType* p, eType o, eType n) {return atomic_compare_and_swap(p, o, n);}
+};
 
 static inline uint32_t xxhash(uint32_t h1, uint32_t h2, uint32_t h3) {
   const uint32_t PRIME32_1 = 2654435761U;
@@ -236,19 +202,14 @@ struct consHash {
   int cmp(kType v, kType b) {return (std::get<0>(v) == std::get<0>(b) && std::get<1>(v) == std::get<1>(b) && std::get<2>(v) == std::get<2>(b)) ? 0 : -1;}
   bool replaceQ(eType, eType) {return 0;}
   eType update(eType v, eType) {return v;}
-  bool cas(eType* p, eType o, eType n) {return
-    atomic_compare_and_swap(p, o, n);}
-    };
-
-
-
+  bool cas(eType* p, eType o, eType n) {return atomic_compare_and_swap(p, o, n);}
+};
 
 struct RequestHash {
   std::size_t operator()(const JitRequest& req) const {
     return req.hash();
   }
 };
-
 
 struct RequestEqual {
   bool recursive_equal(const JitRequest& lhs, const JitRequest& rhs) const {
@@ -282,6 +243,7 @@ class RGDServiceImpl {
   public:
     RGDServiceImpl();
 };
+
 static std::atomic<uint64_t> jigsaw_queue_size;
 static std::atomic<uint64_t> z3_queue_size;
 static std::atomic<uint64_t> uuid;
@@ -306,7 +268,8 @@ static std::atomic<uint64_t> parsing2_total;
 static std::atomic<uint64_t> parsing_total3;
 static std::atomic<uint64_t> iterations_total;
 static std::atomic<uint64_t> gCmdIdx(0);
-}
+
+} // namespace rgd
 
 
 static void dumpFut(FUT* fut) {
@@ -328,47 +291,11 @@ RGDServiceImpl::RGDServiceImpl() {
   llvm::InitializeNativeTargetAsmPrinter();
   llvm::InitializeNativeTargetAsmParser();
 
-  //GradJit* jit = new GradJit();
-  //JIT = llvm::make_unique<GradJit>();
   JIT = std::move(GradJit::Create().get());
-  //JIT->addModule(std::move(Module));
-
-  //initModules();
-
-  // initialize module and PassManager
-
-  // Open a new module.
-  //Module = llvm::make_unique<llvm::Module>("rgd jit", Context);
-  //Module->setDataLayout(JIT->getTargetMachine().createDataLayout());
-
-  // Create a new pass manager attached to it.
-  //FPM = llvm::make_unique<llvm::legacy::FunctionPassManager>(Module.get());
-
-  // Do simple "peephole" optimizations and bit-twiddling optzns.
-  //FPM->add(llvm::createInstructionCombiningPass());
-  // Reassociate expressions.
-  //FPM->add(llvm::createReassociatePass());
-  // Eliminate Common SubExpressions.
-  //FPM->add(llvm::createGVNPass());
-  // Simplify the control flow graph (deleting unreachable blocks, etc).
-  // FPM->add(llvm::createCFGSimplificationPass());
-
-  //FPM->doInitialization();
 
 #if THREAD_POOL_SIZE
   //pool = new ctpl::thread_pool(THREAD_POOL_SIZE);
 #endif
-}
-
-
-
-static inline bool isRelational(uint32_t kind) {
-  if (kind == rgd::Equal || kind == rgd::Distinct || kind == rgd::Ugt || kind == rgd::Ult
-      || kind == rgd::Uge || kind == rgd::Ule || kind == rgd::Sgt || kind == rgd::Slt
-      || kind == rgd::Sge || kind == rgd::Sle)
-    return true;
-  else
-    return false;
 }
 
 
@@ -411,7 +338,7 @@ static void mapArgs(JitRequest* req,
     std::shared_ptr<Constraint> constraint,
     std::unordered_set<uint32_t> &visited) {
 
-  for (int i=0; i < req->children_size(); i++)	{
+  for (int i=0; i < req->children_size(); i++) {
     auto child = req->mutable_children(i);
     uint32_t label = child->label();
     if (label!=0 && visited.count(label)==1)
@@ -428,12 +355,12 @@ static void mapArgs(JitRequest* req,
   //if (req->kind() < rgd::Equal || req->kind() > rgd::Sge)
     //XXH32_update(&state, &kind, sizeof(kind));
   if (req->kind() == rgd::Constant) {
-    uint32_t start = (uint32_t)constraint->input_args_scratch.size();
+    uint32_t start = (uint32_t)constraint->input_args.size();
     req->set_index(start);  //save index
     llvm::StringRef ref(req->value());
     llvm::APInt value(req->bits(), ref, 10);
     uint64_t iv = value.getZExtValue();
-    constraint->input_args_scratch.push_back(std::make_pair(false,iv));
+    constraint->input_args.push_back(std::make_pair(false,iv));
     constraint->const_num += 1;
     //build index by local index
     //XXH32_update(&state,&start,sizeof(start));
@@ -455,10 +382,10 @@ static void mapArgs(JitRequest* req,
       uint32_t arg_index = 0;
       auto itr = constraint->local_map.find(offset);
       if ( itr == constraint->local_map.end()) {
-        arg_index = (uint32_t)constraint->input_args_scratch.size();
+        arg_index = (uint32_t)constraint->input_args.size();
         constraint->inputs.insert({offset,(uint8_t)(iv & 0xff)});
         constraint->local_map[offset] = arg_index;
-        constraint->input_args_scratch.push_back(std::make_pair(true,0)); // 0 is to be filled in the aggragation
+        constraint->input_args.push_back(std::make_pair(true,0)); // 0 is to be filled in the aggragation
       } else {
         arg_index = itr->second;
       }
@@ -489,9 +416,13 @@ static void mapArgs(JitRequest* req,
 //local map:  request->index() -> indices in the fut->scatch_args
 //constant_values: u8 value -> indices in the fut->scratch_args
 static void analyzeExpr(JitRequest* request, 
-    std::map<uint32_t, std::vector<uint32_t>> &local_map, std::map<uint32_t,uint32_t> &global_map,
-    uint32_t &last_offset, std::vector<std::pair<uint8_t,uint32_t>> &constant_values,
-    bool &hasIte, bool &abWidth, int depth, bool &nonRootLNot, bool &div, bool &hasZExt, bool &zext_bool,std::unordered_map<uint32_t, JitRequest*> &expr_cache) {
+    std::map<uint32_t, std::vector<uint32_t>> &local_map,
+    std::map<uint32_t, uint32_t> &global_map,
+    uint32_t &last_offset,
+    std::vector<std::pair<uint8_t,uint32_t>> &constant_values,
+    bool &hasIte, bool &abWidth, int depth, bool &nonRootLNot,
+    bool &div, bool &hasZExt, bool &zext_bool,
+    std::unordered_map<uint32_t, JitRequest*> &expr_cache) {
 
   auto r1 = expr_cache.find(request->label());
 
@@ -501,7 +432,6 @@ static void analyzeExpr(JitRequest* request,
       r1 != expr_cache.end()) {
     request = expr_cache[request->label()];
   }
-
 
   if (request->bits() > 64) abWidth = true;
 
@@ -561,621 +491,6 @@ for (int i = 0; i < request->children_size(); i++)
       constant_values, hasIte, abWidth, ++depth, nonRootLNot, div, hasZExt, zext_bool ,expr_cache);
 }
 
-
-//TODO sys_map's name should be local map
-static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
-    const JitRequest* request,
-    std::unordered_map<uint32_t,uint32_t> &local_map, llvm::Value* arg,
-    std::unordered_map<uint32_t, llvm::Value*> &value_cache,
-    std::unordered_map<uint32_t, JitRequest*> &expr_cache) {
-  llvm::Value* ret = nullptr;
-  //std::cout << "code gen and nargs is " << nargs << std::endl;
-  auto r1 = expr_cache.find(request->label());
-
-  if (request->label() != 0 &&
-      r1 != expr_cache.end()) {
-    request = expr_cache[request->label()];
-  }
-
-  auto itr = value_cache.find(request->label());
-
-  //if hash is zero, then it is a READ expr 
-  if (request->label() != 0
-      && itr != value_cache.end()) {
-    //std::cout << " value cache hit and label is " << request->label() << std::endl;
-    return itr->second;
-  }
-
-  switch (request->kind()) {
-    case rgd::Bool: {
-                      //std::cout << "bool codegen" << std::endl;
-                      // getTrue is actually 1 bit integer 1
-                      if(request->boolvalue())
-                        ret = llvm::ConstantInt::getTrue(Builder.getContext());
-                      else
-                        ret = llvm::ConstantInt::getFalse(Builder.getContext());
-                      break;
-                    }
-    case rgd::Constant: {
-                          //The constant is now loading from arguments
-                          uint32_t start = request->index();
-                          uint32_t length = request->bits()/8;
-
-                          llvm::Value* idx[1];
-                          idx[0] = llvm::ConstantInt::get(Builder.getInt32Ty(),start);
-#if CODEGEN_V2
-                          idx[0] = llvm::ConstantInt::get(Builder.getInt32Ty(),start+2);
-#endif
-                          ret = Builder.CreateLoad(Builder.CreateGEP(arg,idx));
-                          ret = Builder.CreateTrunc(ret, llvm::Type::getIntNTy(Builder.getContext(),request->bits()));
-                          break;
-                        }
-
-    case rgd::Read: {
-                      uint32_t start = local_map[request->index()];
-                      size_t length = request->bits()/8;
-                      //std::cout << "read index " << start << " length " << length << std::endl;
-                      llvm::Value* idx[1];
-                      idx[0] = llvm::ConstantInt::get(Builder.getInt32Ty(),start);
-#if CODEGEN_V2
-                      idx[0] = llvm::ConstantInt::get(Builder.getInt32Ty(),start+2);
-#endif
-                      ret = Builder.CreateLoad(Builder.CreateGEP(arg,idx));
-                      for(uint32_t k = 1; k < length; k++) {
-                        idx[0] = llvm::ConstantInt::get(Builder.getInt32Ty(),start+k);
-#if CODEGEN_V2
-                        idx[0] = llvm::ConstantInt::get(Builder.getInt32Ty(),start+k+2);
-#endif
-                        llvm::Value* tmp = Builder.CreateLoad(Builder.CreateGEP(arg,idx));
-                        tmp = Builder.CreateShl(tmp, 8 * k);
-                        ret =Builder.CreateOr(ret,tmp);
-                      }
-                      ret = Builder.CreateTrunc(ret, llvm::Type::getIntNTy(Builder.getContext(),request->bits()));
-                      break;
-                    }
-    case rgd::Concat: {
-                        const JitRequest* rc1 = &request->children(0);
-                        const JitRequest* rc2 = &request->children(1);
-                        uint32_t bits =  rc1->bits() + rc2->bits(); 
-                        llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                        llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                        ret = Builder.CreateOr(
-                            Builder.CreateShl(
-                              Builder.CreateZExt(c2,llvm::Type::getIntNTy(Builder.getContext(),bits)),
-                              rc1->bits()),
-                            Builder.CreateZExt(c1, llvm::Type::getIntNTy(Builder.getContext(), bits)));
-                        break;
-                      }
-    case rgd::Extract: {
-#if DEBUG
-                         //std::cerr << "Extract expression" << std::endl;
-#endif
-                         const JitRequest* rc = &request->children(0);
-                         llvm::Value* c = codegen(Builder,rc, local_map, arg, value_cache, expr_cache);
-                         ret = Builder.CreateTrunc(
-                             Builder.CreateLShr(c, request->index()),
-                             llvm::Type::getIntNTy(Builder.getContext(), request->bits()));
-                         break;
-                       }
-    case rgd::ZExt: {
-#if DEBUG
-                      // std::cerr << "ZExt the bits is " << request->bits() << std::endl;
-#endif
-                      const JitRequest* rc = &request->children(0);
-                      llvm::Value* c = codegen(Builder,rc, local_map, arg, value_cache, expr_cache);
-                      //FIXME: we may face ZEXT to boolean expr
-                      ret = Builder.CreateZExtOrTrunc(c, llvm::Type::getIntNTy(Builder.getContext(), request->bits()));
-                      break;
-                    }
-    case rgd::SExt: {
-#if DEBUG
-                      // std::cerr << "SExt the bits is " << request->bits() << std::endl;
-#endif
-                      const JitRequest* rc = &request->children(0);
-                      llvm::Value* c = codegen(Builder,rc,local_map, arg, value_cache, expr_cache);
-                      ret = Builder.CreateSExt(c, llvm::Type::getIntNTy(Builder.getContext(), request->bits()));
-                      break;
-                    }
-    case rgd::Add: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     ret = Builder.CreateAdd(c1, c2);
-                     break;
-                   }
-    case rgd::Sub: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     ret = Builder.CreateSub(c1, c2);
-                     break;
-                   }
-    case rgd::Mul: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     ret = Builder.CreateMul(c1, c2);
-                     break;
-                   }
-    case rgd::UDiv: {
-                      const JitRequest* rc1 = &request->children(0);
-                      const JitRequest* rc2 = &request->children(1);
-                      llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                      llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                      llvm::Value* VA0 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 0);
-                      llvm::Value* VA1 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 1);
-                      llvm::Value* cond = Builder.CreateICmpEQ(c2,VA0);
-                      llvm::Value* divisor = Builder.CreateSelect(cond,VA1,c2);
-                      ret = Builder.CreateUDiv(c1, divisor);
-                      break;
-                    }
-    case rgd::SDiv: {
-                      const JitRequest* rc1 = &request->children(0);
-                      const JitRequest* rc2 = &request->children(1);
-                      llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                      llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                      llvm::Value* VA0 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 0);
-                      llvm::Value* VA1 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 1);
-                      llvm::Value* cond = Builder.CreateICmpEQ(c2,VA0);
-                      llvm::Value* divisor = Builder.CreateSelect(cond,VA1,c2);
-                      ret = Builder.CreateSDiv(c1, divisor);
-                      break;
-                    }
-    case rgd::URem: {
-                      const JitRequest* rc1 = &request->children(0);
-                      const JitRequest* rc2 = &request->children(1);
-                      llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                      llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                      llvm::Value* VA0 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 0);
-                      llvm::Value* VA1 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 1);
-                      llvm::Value* cond = Builder.CreateICmpEQ(c2,VA0);
-                      llvm::Value* divisor = Builder.CreateSelect(cond,VA1,c2);
-                      ret = Builder.CreateURem(c1, divisor);
-                      break;
-                    }
-    case rgd::SRem: {
-                      const JitRequest* rc1 = &request->children(0);
-                      const JitRequest* rc2 = &request->children(1);
-                      llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                      llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                      llvm::Value* VA0 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 0);
-                      llvm::Value* VA1 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 1);
-                      llvm::Value* cond = Builder.CreateICmpEQ(c2,VA0);
-                      llvm::Value* divisor = Builder.CreateSelect(cond,VA1,c2);
-                      ret = Builder.CreateSRem(c1, divisor);
-                      break;
-                    }
-    case rgd::Neg: {
-                     const JitRequest* rc = &request->children(0);
-                     llvm::Value* c = codegen(Builder,rc, local_map, arg, value_cache, expr_cache);
-                     ret = Builder.CreateNeg(c);
-                     break;
-                   }
-    case rgd::Not: {
-                     const JitRequest* rc = &request->children(0);
-                     llvm::Value* c = codegen(Builder,rc, local_map, arg, value_cache, expr_cache);
-                     ret = Builder.CreateNot(c);
-                     break;
-                   }
-    case rgd::And: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     ret = Builder.CreateAnd(c1, c2);
-                     break;
-                   }
-    case rgd::Or: {
-                    const JitRequest* rc1 = &request->children(0);
-                    const JitRequest* rc2 = &request->children(1);
-                    llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                    llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                    ret = Builder.CreateOr(c1, c2);
-                    break;
-                  }
-    case rgd::Xor: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     ret = Builder.CreateXor(c1, c2);
-                     break;
-                   }
-    case rgd::Shl: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     ret = Builder.CreateShl(c1, c2);
-                     break;
-                   }
-    case rgd::LShr: {
-                      const JitRequest* rc1 = &request->children(0);
-                      const JitRequest* rc2 = &request->children(1);
-                      llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                      llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                      ret = Builder.CreateLShr(c1, c2);
-                      break;
-                    }
-    case rgd::AShr: {
-                      const JitRequest* rc1 = &request->children(0);
-                      const JitRequest* rc2 = &request->children(1);
-                      llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                      llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                      ret = Builder.CreateAShr(c1, c2);
-                      break;
-                    }
-                    // all the following ICmp expressions should be top level
-    case rgd::Equal: {
-                       const JitRequest* rc1 = &request->children(0);
-                       const JitRequest* rc2 = &request->children(1);
-                       llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                       llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                       //assert(rc1->bits() != 64 && "64-bit comparison");
-                       //extend to 64bit
-                       llvm::Value* c1e = Builder.CreateZExt(c1,llvm::Type::getIntNTy(Builder.getContext(),64));
-                       llvm::Value* c2e = Builder.CreateZExt(c2,llvm::Type::getIntNTy(Builder.getContext(),64));
-
-#if CODEGEN_V2
-                       llvm::Value* idx[1];
-                       idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),0);
-                       Builder.CreateStore(c1e, Builder.CreateGEP(arg,idx));
-                       idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),1);
-                       Builder.CreateStore(c2e, Builder.CreateGEP(arg,idx));
-#endif
-                       llvm::Value* cond = Builder.CreateICmpUGE(c1e,c2e);
-                       //(int64_t) 0
-                       llvm::Value* tv = Builder.CreateSub(c1e,c2e,"equal");
-                       llvm::Value* fv = Builder.CreateSub(c2e,c1e,"equal");
-                       ret = Builder.CreateSelect(cond, tv, fv);
-                       break;
-                     }
-    case rgd::Distinct: {
-                          const JitRequest* rc1 = &request->children(0);
-                          const JitRequest* rc2 = &request->children(1);
-                          llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                          llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                          //assert(rc1->bits() != 64 && "64-bit comparison");
-                          //extend to 64bit
-                          llvm::Value* c1e = Builder.CreateZExt(c1,llvm::Type::getIntNTy(Builder.getContext(),64));
-                          llvm::Value* c2e = Builder.CreateZExt(c2,llvm::Type::getIntNTy(Builder.getContext(),64));
-
-#if CODEGEN_V2
-                          llvm::Value* idx[1];
-                          idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),0);
-                          Builder.CreateStore(c1e, Builder.CreateGEP(arg,idx));
-                          idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),1);
-                          Builder.CreateStore(c2e, Builder.CreateGEP(arg,idx));
-#endif
-
-                          llvm::Value* cond = Builder.CreateICmpEQ(c1e,c2e);
-                          llvm::APInt value1(64, 1, false);
-                          llvm::APInt value0(64, 0, false);
-                          //return 1 if EQUAL, return 0 is not equal
-                          llvm::Value* tv = llvm::ConstantInt::get(Builder.getContext(),value1);
-                          llvm::Value* fv = llvm::ConstantInt::get(Builder.getContext(),value0);
-                          ret = Builder.CreateSelect(cond, tv, fv);
-                          break;
-                        }
-                        //for all relation comparison, we extend to 64-bit
-    case rgd::Ult: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     //assert(rc1->bits() != 64 && "64-bit comparison");
-                     //extend to 64bit
-                     llvm::Value* c1e = Builder.CreateZExt(c1,llvm::Type::getIntNTy(Builder.getContext(),64));
-                     llvm::Value* c2e = Builder.CreateZExt(c2,llvm::Type::getIntNTy(Builder.getContext(),64));
-
-#if CODEGEN_V2
-                     llvm::Value* idx[1];
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),0);
-                     Builder.CreateStore(c1e, Builder.CreateGEP(arg,idx));
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),1);
-                     Builder.CreateStore(c2e, Builder.CreateGEP(arg,idx));
-#endif
-                     llvm::Value* cond = Builder.CreateICmpULT(c1e,c2e);
-                     //(int64_t) 0
-                     llvm::APInt value(64, 0, true);
-                     llvm::APInt value1(64, 1, true);
-                     llvm::Value* tv = llvm::ConstantInt::get(Builder.getContext(), value);
-                     llvm::Value* fv = Builder.CreateAdd(Builder.CreateSub(c1e, c2e, "Ult"), 
-                         llvm::ConstantInt::get(Builder.getContext(),value1));
-                     ret = Builder.CreateSelect(cond, tv, fv);
-                     break;
-                   }
-    case rgd::Ule: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     //assert(rc1->bits() != 64 && "64-bit comparison");
-                     //extend to 64bit
-                     llvm::Value* c1e = Builder.CreateZExt(c1,llvm::Type::getIntNTy(Builder.getContext(),64));
-                     llvm::Value* c2e = Builder.CreateZExt(c2,llvm::Type::getIntNTy(Builder.getContext(),64));
-                     llvm::Value* cond = Builder.CreateICmpULE(c1e,c2e);
-
-#if CODEGEN_V2
-                     llvm::Value* idx[1];
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),0);
-                     Builder.CreateStore(c1e, Builder.CreateGEP(arg,idx));
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),1);
-                     Builder.CreateStore(c2e, Builder.CreateGEP(arg,idx));
-#endif
-                     llvm::APInt value(64, 0, true);
-                     llvm::Value* tv = llvm::ConstantInt::get(Builder.getContext(), value);
-                     llvm::Value* fv = Builder.CreateSub(c1e, c2e, "Ule");
-                     ret = Builder.CreateSelect(cond, tv, fv);
-                     break;
-                   }
-    case rgd::Ugt: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     //assert(rc1->bits() != 64 && "64-bit comparison");
-                     //extend to 64bit
-                     llvm::Value* c1e = Builder.CreateZExt(c1,llvm::Type::getIntNTy(Builder.getContext(),64));
-                     llvm::Value* c2e = Builder.CreateZExt(c2,llvm::Type::getIntNTy(Builder.getContext(),64));
-                     llvm::Value* cond = Builder.CreateICmpUGT(c1e,c2e);
-
-#if CODEGEN_V2
-                     llvm::Value* idx[1];
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),0);
-                     Builder.CreateStore(c1e, Builder.CreateGEP(arg,idx));
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),1);
-                     Builder.CreateStore(c2e, Builder.CreateGEP(arg,idx));
-#endif
-                     //(int64_t) 0
-                     llvm::APInt value(64, 0, true);
-                     llvm::APInt value1(64, 1, true);
-                     llvm::Value* tv = llvm::ConstantInt::get(Builder.getContext(), value);
-                     llvm::Value* fv = Builder.CreateAdd(Builder.CreateSub(c2e, c1e, "Ugt"), 
-                         llvm::ConstantInt::get(Builder.getContext(),value1));
-                     ret = Builder.CreateSelect(cond, tv, fv);
-                     break;
-                   }
-    case rgd::Uge: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     //assert(rc1->bits() != 64 && "64-bit comparison");
-                     //extend to 64bit
-                     llvm::Value* c1e = Builder.CreateZExt(c1,llvm::Type::getIntNTy(Builder.getContext(),64));
-                     llvm::Value* c2e = Builder.CreateZExt(c2,llvm::Type::getIntNTy(Builder.getContext(),64));
-
-#if CODEGEN_V2
-                     llvm::Value* idx[1];
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),0);
-                     Builder.CreateStore(c1e, Builder.CreateGEP(arg,idx));
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),1);
-                     Builder.CreateStore(c2e, Builder.CreateGEP(arg,idx));
-#endif
-                     llvm::Value* cond = Builder.CreateICmpUGE(c1e,c2e);
-                     //(int64_t) 0
-                     llvm::APInt value(64, 0, true);
-                     llvm::Value* tv = llvm::ConstantInt::get(Builder.getContext(), value);
-                     llvm::Value* fv = Builder.CreateSub(c2e, c1e, "Uge");
-                     ret = Builder.CreateSelect(cond, tv, fv);
-                     break;
-                   }
-    case rgd::Slt: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     //assert(rc1->bits() != 64 && "64-bit comparison");
-                     //extend to 64bit
-                     llvm::Value* c1e = Builder.CreateSExt(c1,llvm::Type::getIntNTy(Builder.getContext(),64));
-                     llvm::Value* c2e = Builder.CreateSExt(c2,llvm::Type::getIntNTy(Builder.getContext(),64));
-
-#if CODEGEN_V2
-                     llvm::Value* idx[1];
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),0);
-                     Builder.CreateStore(c1e, Builder.CreateGEP(arg,idx));
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),1);
-                     Builder.CreateStore(c2e, Builder.CreateGEP(arg,idx));
-#endif
-                     llvm::Value* cond = Builder.CreateICmpSLT(c1e,c2e);
-                     //(int64_t) 0
-                     llvm::APInt value(64, 0, true);
-                     llvm::APInt value1(64, 1, true);
-                     llvm::Value* tv = llvm::ConstantInt::get(Builder.getContext(), value);
-                     llvm::Value* fv = Builder.CreateAdd(Builder.CreateSub(c1e, c2e, "Slt"), 
-                         llvm::ConstantInt::get(Builder.getContext(),value1));
-                     ret = Builder.CreateSelect(cond, tv, fv);
-                     break;
-                   }
-    case rgd::Sle: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     //assert(rc1->bits() != 64 && "64-bit comparison");
-                     //extend to 64bit
-                     llvm::Value* c1e = Builder.CreateSExt(c1,llvm::Type::getIntNTy(Builder.getContext(),64));
-                     llvm::Value* c2e = Builder.CreateSExt(c2,llvm::Type::getIntNTy(Builder.getContext(),64));
-
-#if CODEGEN_V2
-                     llvm::Value* idx[1];
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),0);
-                     Builder.CreateStore(c1e, Builder.CreateGEP(arg,idx));
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),1);
-                     Builder.CreateStore(c2e, Builder.CreateGEP(arg,idx));
-#endif
-                     llvm::Value* cond = Builder.CreateICmpSLE(c1e,c2e);
-                     //(int64_t) 0
-                     llvm::APInt value(64, 0, true);
-                     llvm::Value* tv = llvm::ConstantInt::get(Builder.getContext(), value);
-                     llvm::Value* fv = Builder.CreateSub(c1e, c2e, "Sle");
-                     ret = Builder.CreateSelect(cond, tv, fv);
-
-                     break;
-                   }
-    case rgd::Sgt: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     //assert(rc1->bits() != 64 && "64-bit comparison");
-                     //extend to 64bit
-                     llvm::Value* c1e = Builder.CreateSExt(c1,llvm::Type::getIntNTy(Builder.getContext(),64));
-                     llvm::Value* c2e = Builder.CreateSExt(c2,llvm::Type::getIntNTy(Builder.getContext(),64));
-
-#if CODEGEN_V2
-                     llvm::Value* idx[1];
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),0);
-                     Builder.CreateStore(c1e, Builder.CreateGEP(arg,idx));
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),1);
-                     Builder.CreateStore(c2e, Builder.CreateGEP(arg,idx));
-#endif
-                     llvm::Value* cond = Builder.CreateICmpSGT(c1e,c2e);
-                     //(int64_t) 0
-                     llvm::APInt value(64, 0, true);
-                     llvm::APInt value1(64, 1, true);
-                     llvm::Value* tv = llvm::ConstantInt::get(Builder.getContext(), value);
-                     llvm::Value* fv = Builder.CreateAdd(Builder.CreateSub(c2e, c1e, "Sgt"), 
-                         llvm::ConstantInt::get(Builder.getContext(),value1));
-                     ret = Builder.CreateSelect(cond, tv, fv);
-                     break;
-                   }
-    case rgd::Sge: {
-                     const JitRequest* rc1 = &request->children(0);
-                     const JitRequest* rc2 = &request->children(1);
-                     llvm::Value* c1 = codegen(Builder,rc1, local_map, arg, value_cache, expr_cache);
-                     llvm::Value* c2 = codegen(Builder,rc2, local_map, arg, value_cache, expr_cache);
-                     //assert(rc1->bits() != 64 && "64-bit comparison");
-                     //extend to 64bit
-                     llvm::Value* c1e = Builder.CreateSExt(c1,llvm::Type::getIntNTy(Builder.getContext(),64));
-                     llvm::Value* c2e = Builder.CreateSExt(c2,llvm::Type::getIntNTy(Builder.getContext(),64));
-
-#if CODEGEN_V2
-                     llvm::Value* idx[1];
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),0);
-                     Builder.CreateStore(c1e, Builder.CreateGEP(arg,idx));
-                     idx[0]= llvm::ConstantInt::get(Builder.getInt32Ty(),1);
-                     Builder.CreateStore(c2e, Builder.CreateGEP(arg,idx));
-#endif
-                     llvm::Value* cond = Builder.CreateICmpSGE(c1e,c2e);
-                     //(int64_t) 0
-                     llvm::APInt value(64, 0, true);
-                     llvm::Value* tv = llvm::ConstantInt::get(Builder.getContext(), value);
-                     llvm::Value* fv = Builder.CreateSub(c2e, c1e, "Sge");
-                     ret = Builder.CreateSelect(cond, tv, fv);
-                     break;
-                   }
-                   // this should never happen!
-    case rgd::LOr: {
-                     assert(false && "LOr expression");
-                     break;
-                   }
-    case rgd::LAnd: {
-                      assert(false && "LAnd expression");
-                      break;
-                    }
-    case rgd::LNot: {
-                      assert(false && "LNot expression");
-                      break;
-                    }
-    case rgd::Ite: {
-                     // don't handle ITE for now, doesn't work with GD
-#if DEUBG
-                     std::cerr << "ITE expr codegen" << std::endl;
-#endif
-#if 0
-                     const JitRequest* rcond = &request->children(0);
-                     const JitRequest* rtv = &request->children(1);
-                     const JitRequest* rfv = &request->children(2);
-                     llvm::Value* cond = codegen(rcond, local_map, arg, value_cache);
-                     llvm::Value* tv = codegen(rtv, local_map, arg, value_cache);
-                     llvm::Value* fv = codegen(rfv, local_map, arg, value_cache);
-                     ret = Builder.CreateSelect(cond, tv, fv);
-#endif
-                     break;}
-    default:
-                   //std::cerr << "WARNING: unhandled expr: ";
-                   printExpression(request);
-                   break;
-  }
-
-  // add to cache
-  if (ret && request->label()!=0) {
-    value_cache.insert({request->label(), ret});
-  }
-
-  return ret; 
-}
-
-static int addFunction(const JitRequest* request,
-    std::unordered_map<uint32_t,uint32_t> &sym_map,
-    std::string funcName,
-    std::unordered_map<uint32_t,JitRequest*> &expr_cache) {
-
-  assert(isRelational(request->kind()) && "non-relational expr");
-
-  // Open a new module.
-  static uint64_t moduleId = 0;
-  std::string moduleName = "jitModule" + std::to_string(++moduleId);
-
-
-  auto TheCtx = llvm::make_unique<llvm::LLVMContext>();
-  auto TheModule = llvm::make_unique<Module>(moduleName, *TheCtx);
-  //ThreadSafeModule  TheModule(
-  //llvm::make_unique<llvm::Module>("M1", *TSCtx.Builder.getContext()), TSCtx);
-  TheModule->setDataLayout(JIT->getDataLayout());
-  //std::unique_ptr<llvm::legacy::FunctionPassManager> FPM;
-  llvm::IRBuilder<> Builder(*TheCtx);
-
-
-  std::vector<llvm::Type*> input_type(1,
-      llvm::PointerType::getUnqual(Builder.getInt64Ty()));
-  //std::vector<llvm::Type*> input_type(1,
-  //			llvm::ArrayType::get(Builder.getInt8Ty(), nargs));
-  llvm::FunctionType *funcType;
-  funcType = llvm::FunctionType::get(Builder.getInt64Ty(), input_type, false);
-  auto *fooFunc = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
-      funcName, TheModule.get());
-  auto *po = llvm::BasicBlock::Create(Builder.getContext(), "entry", fooFunc);
-  Builder.SetInsertPoint(po);
-  uint32_t idx = 0;
-
-  auto args = fooFunc->arg_begin();
-  llvm::Value* var = &(*args);
-  std::unordered_map<uint32_t, llvm::Value*> value_cache;
-  auto *body = codegen(Builder, request, sym_map, var, value_cache, expr_cache);
-  Builder.CreateRet(body);
-
-
-  llvm::raw_ostream *stream = &llvm::outs();
-  llvm::verifyFunction(*fooFunc, stream);
-#if 1
-  //	TheModule->print(llvm::errs(),nullptr);
-#endif
-
-  JIT->addModule(std::move(TheModule),std::move(TheCtx));
-
-  return 0;
-}
-
-static test_fn_type performJit(uint64_t id, int threadId) {
-
-  //llvm::orc::ThreadSafeModule TSM(std::move(TheModule), TSCtx);
-  //auto H = JIT->addModule(std::move(TheModule));
-  //initModules();
-  // Retrieve the foo symbol
-  //uint8_t tt[10] = {0,8,0,0,0,4,4,0,0,0};
-  std::string funcName = "jutest" + std::to_string(id);
-  auto ExprSymbol = JIT->lookup(funcName).get();
-  auto func = (uint64_t(*)(uint64_t*))ExprSymbol.getAddress();
-  return func;
-}
-
-
 static const JitRequest* transform(const JitRequest* request, int &constraint) {
   switch (request->kind()) {
     case rgd::Equal:
@@ -1209,47 +524,47 @@ static const JitRequest* transform(const JitRequest* request, int &constraint) {
       constraint = 5; 
       break;
     case rgd::LNot: {
-                      switch (request->children(0).kind()) {
-                        case rgd::Equal:
-                          constraint = 1;
-                          break;
-                        case rgd::Distinct:
-                          constraint = 0;
-                          break;
-                        case rgd::Ult:
-                          constraint = 5; 
-                          break;
-                        case rgd::Ule:
-                          constraint = 4;
-                          break;
-                        case rgd::Ugt:
-                          constraint = 3;
-                          break;
-                        case rgd::Uge:
-                          constraint = 2;
-                          break;
-                        case rgd::Slt:
-                          constraint = 5;
-                          break;
-                        case rgd::Sle:
-                          constraint = 4;
-                          break;
-                        case rgd::Sgt:
-                          constraint = 3;
-                          break;
-                        case rgd::Sge:
-                          constraint = 2;
-                          break;
-                        default:
-                          //std::cerr << "unhandled child kind " << request->children(0).kind() << std::endl; 
-                          return nullptr;
-                      }
-                      return &request->children(0);
-                    }
+      switch (request->children(0).kind()) {
+        case rgd::Equal:
+          constraint = 1;
+          break;
+        case rgd::Distinct:
+          constraint = 0;
+          break;
+        case rgd::Ult:
+          constraint = 5; 
+          break;
+        case rgd::Ule:
+          constraint = 4;
+          break;
+        case rgd::Ugt:
+          constraint = 3;
+          break;
+        case rgd::Uge:
+          constraint = 2;
+          break;
+        case rgd::Slt:
+          constraint = 5;
+          break;
+        case rgd::Sle:
+          constraint = 4;
+          break;
+        case rgd::Sgt:
+          constraint = 3;
+          break;
+        case rgd::Sge:
+          constraint = 2;
+          break;
+        default:
+          //std::cerr << "unhandled child kind " << request->children(0).kind() << std::endl; 
+          return nullptr;
+      }
+      return &request->children(0);
+    }
     default:
-                    // all subexpr must be a comparison (conditional branch)
-                    //std::cerr << "unhandled kind " << request->kind() << std::endl; 
-                    return nullptr;
+      // all subexpr must be a comparison (conditional branch)
+      //std::cerr << "unhandled kind " << request->kind() << std::endl; 
+      return nullptr;
   }
   return request;
 }
@@ -1351,7 +666,6 @@ static JitRequest* negate(JitRequest* request) {
 }
 
 
-
 static JitRequest* simplify(JitRequest* request) {
   // strip LNot
   if (request->kind() == rgd::LNot)
@@ -1423,7 +737,7 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
   struct FUT *fut = new FUT();
   //GradJit *JIT = new GradJit();
   fut->gsol = false;
-  fut->att = 0;
+  fut->attempts = 0;
   fut->stopped = false;
   fut->num_minimal_optima = 0;
   static int localhit=0;
@@ -1471,13 +785,12 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
     copied_req->CopyFrom(*adjusted_request);
 
     struct myKV *res = fCache.find(copied_req);
-    //		struct myKV *res = nullptr;
+    //  struct myKV *res = nullptr;
     if (res == nullptr) {
       miss++;
       uint64_t id = ++uuid;
-      std::string funcName = "jutest" + std::to_string(id);
-      addFunction(adjusted_request, constraint->local_map ,funcName, expr_cache);
-      auto fn = performJit(id,threadId);
+      addFunction(adjusted_request, constraint->local_map, id, expr_cache);
+      auto fn = performJit(id);
       if (!fCache.insert(new struct myKV(copied_req, fn))) {
         delete res;
         res = nullptr;
@@ -1691,8 +1004,8 @@ static int sendLocalCmd(bool opti, std::shared_ptr<JitCmdv2> cmd, int i,
       bool suc = gd_entry(dut);
       uint64_t solving = getTimeStamp() - dut->start;
       solving_total += solving;
-      iterations_total += dut->att;
-      *iter  =  (*iter) + dut->att;
+      iterations_total += dut->attempts;
+      *iter  =  (*iter) + dut->attempts;
       *st = (*st) + getTimeStamp() - start_solving;
       if (suc) {
         break;
@@ -1755,7 +1068,7 @@ std::vector<std::shared_ptr<JitCmdv2>> allCmds;
 std::unordered_map<uint32_t,std::shared_ptr<JitRequest>> nestedCache(10000);
 
 struct thread_data {
-  int  thread_id;
+  int thread_id;
   int amount;
 };
 
@@ -1764,20 +1077,16 @@ moodycamel::ConcurrentQueue<std::shared_ptr<JitCmdv2>> jigsawqueue;
 
 
 void* rgdTask(void *threadarg) {
-  //void* rgdTask(int i, std::shared_ptr<JitCmdv2> cmdDone) {
-  struct thread_data *my_data;
-  my_data = (struct thread_data *) threadarg;
-  int i  = my_data->thread_id;
-  int idx = 0;//gCmdIdx.fetch_add(1,std::memory_order_relaxed);
-  while (idx<my_data->amount) {
-    std::shared_ptr<JitCmdv2> cmd = allCmds[idx%my_data->amount];
-    idx = gCmdIdx.fetch_add(1,std::memory_order_relaxed);
+  struct thread_data *my_data = (struct thread_data *) threadarg;
+  int i = my_data->thread_id;
+  int idx = 0;
+  while ((idx = gCmdIdx.fetch_add(1, std::memory_order_relaxed)) < my_data->amount) {
+    std::shared_ptr<JitCmdv2> cmd = allCmds[idx % my_data->amount];
 #if NESTED_BRANCH
-    std::shared_ptr<JitCmdv2> cmdDone =  std::make_shared<JitCmdv2>();
+    std::shared_ptr<JitCmdv2> cmdDone = std::make_shared<JitCmdv2>();
     cmdDone->set_cmd(2);
     cmdDone->set_file_name(cmd->file_name());
-    for(int i =0 ;i<cmd->expr_size();i++) {
-      //	for(int i =0 ;i<1;i++) {
+    for(int i = 0 ;i < cmd->expr_size(); i++) {
       JitRequest* targetReq = cmdDone->add_expr();
       if (cmd->expr(i).direction() == 0) {
         targetReq->set_kind(rgd::LNot);
@@ -1787,8 +1096,7 @@ void* rgdTask(void *threadarg) {
       }
       if (cmd->expr(i).full() == 1) {
         targetReq->CopyFrom(cmd->expr(i));
-      }
-      else {
+      } else {
         struct nestKV *res = nestCache.find(cmd->expr(i).sessionid()*10000+cmd->expr(i).label());
         //auto req = nestCache[cmd->expr(i).sessionid()*10000+cmd->expr(i).label()];
         if (!res) {   //TODO exception here?
@@ -1797,7 +1105,7 @@ void* rgdTask(void *threadarg) {
         targetReq->CopyFrom(*res->req);
       }
     }
-    std::shared_ptr<JitCmdv2> cmdDoneOpt =  std::make_shared<JitCmdv2>();
+    std::shared_ptr<JitCmdv2> cmdDoneOpt = std::make_shared<JitCmdv2>();
     cmdDoneOpt->set_cmd(2);
     JitRequest* targetReq = cmdDoneOpt->add_expr();
     targetReq->CopyFrom(cmdDone->expr(0));
@@ -1815,11 +1123,11 @@ void* rgdTask(void *threadarg) {
     std::unordered_map<uint32_t,uint8_t> opti_solution;
     std::unordered_map<uint32_t,uint8_t> hint_solution;
 
-    //bool suc = sendZ3Solver(false,solvers[i],cmdDone, rgd_solution, &st);
-    //if(rgd_solution.size()==0) return false;
+    // bool suc = sendZ3Solver(false,solvers[i],cmdDone, rgd_solution, &st);
+    // if(rgd_solution.size()==0) return false;
 
     rgd_solution.clear();
-    //search for the opt
+    // search for the opt
     bool suc = false;
     uint64_t start = getTimeStamp();
 #if NESTED_BRANCH
@@ -1851,8 +1159,8 @@ void* rgdTask(void *threadarg) {
     if(rgd_solution.size()!=0) {
       gFi++;
     }
-    if (gProcessed % 1000==0) {
-      std::cout << "processed" << gProcessed << " constraints" << std::endl;
+    if (gProcessed % 10000==0) {
+      std::cout << "processed " << gProcessed << " constraints" << std::endl;
       std::cout << "elapsed time is " << getTimeStamp() - start_time <<  " cons cache lookup " << parsing_total3 << " iter " << iterations_total << " solved " << gFi << std::endl;
     }
 
@@ -1947,138 +1255,139 @@ void* rgdTask(void *threadarg) {
     }
 #endif
     }
-  }
+  return nullptr;
+}
 
-  void ReplayLocal(char** argv, int num_of_threads) {
-    RGDServiceImpl s;
-    int solved_count = 0;
-    int i = 0;
-    int allcount = 0;
-    int dropcount = 0;
-    int allexpr = 0;
-    for (directory_entry& entry : directory_iterator(argv[3])) {
-      int fd = open(entry.path().c_str(),O_RDONLY);
-      //std::cout << "handling " << entry.path() << std::endl;
-      ZeroCopyInputStream* rawInput = new google::protobuf::io::FileInputStream(fd);
-      bool suc = false;
-      //for each file
-      do {
-        std::shared_ptr<JitCmdv2> cmd =  std::make_shared<JitCmdv2>();
-        suc = readDelimitedFrom(rawInput,cmd.get());
-        if (suc) {
-          //caching the request
-          allcount++;
-          for (int i = 0 ; i< cmd->expr_string_size();i++) {
-            JitRequest* req = cmd->add_expr();
-            CodedInputStream s((uint8_t*)cmd->expr_string(i).c_str(), cmd->expr_string(i).size()); 
-            s.SetRecursionLimit(100);
-            //req->ParseFromString(cmd->expr_string(i));
-            req->ParseFromCodedStream(&s);
-          }
-          for (int i = 0 ; i< cmd->expr_size();i++) {
-            if (cmd->expr(i).full() == 1) {
-              std::shared_ptr<JitRequest> cachedReq =  std::make_shared<JitRequest>();
-              cachedReq->CopyFrom(cmd->expr(i));
-              //nestCache.insert({cmd->expr(i).sessionid()*10000+cmd->expr(i).label(), cachedReq});
-              nestCache.insert(new struct nestKV(cmd->expr(i).sessionid()*10000+cmd->expr(i).label(), cachedReq));
-            }
-          }
-          if (cmd->cmd() == 1) // not to solve
-            continue;
-        } else {
-          break;
+void ReplayLocal(char** argv, int num_of_threads) {
+  RGDServiceImpl s;
+  int solved_count = 0;
+  int i = 0;
+  int allcount = 0;
+  int dropcount = 0;
+  int allexpr = 0;
+  for (directory_entry& entry : directory_iterator(argv[3])) {
+    int fd = open(entry.path().c_str(),O_RDONLY);
+    //std::cout << "handling " << entry.path() << std::endl;
+    ZeroCopyInputStream* rawInput = new google::protobuf::io::FileInputStream(fd);
+    bool ret = false;
+    //for each file
+    do {
+      std::shared_ptr<JitCmdv2> cmd = std::make_shared<JitCmdv2>();
+      ret = readDelimitedFrom(rawInput,cmd.get());
+      if (ret) {
+        //caching the request
+        allcount++;
+        for (int i = 0 ; i< cmd->expr_string_size();i++) {
+          JitRequest* req = cmd->add_expr();
+          CodedInputStream s((uint8_t*)cmd->expr_string(i).c_str(), cmd->expr_string(i).size()); 
+          s.SetRecursionLimit(100);
+          //req->ParseFromString(cmd->expr_string(i));
+          req->ParseFromCodedStream(&s);
         }
-        allexpr += cmd->expr_size();
-        //building nested branches here consuming too much memory
-#if SINGLE_BRANCH
-        std::shared_ptr<JitCmdv2> cmdDone =  std::make_shared<JitCmdv2>();
-        cmdDone->set_cmd(2);
-        for(int i = 0 ;i < 1;i++) {
-          JitRequest* targetReq = cmdDone->add_expr();
-          if (cmd->expr(i).direction() == 0) {
-            targetReq->set_kind(rgd::LNot);
-            targetReq->set_name("lnot");
-            targetReq->set_bits(1);
-            targetReq = targetReq->add_children();
-          }
+        for (int i = 0 ; i< cmd->expr_size();i++) {
           if (cmd->expr(i).full() == 1) {
-            targetReq->CopyFrom(cmd->expr(i));
+            std::shared_ptr<JitRequest> cachedReq = std::make_shared<JitRequest>();
+            cachedReq->CopyFrom(cmd->expr(i));
+            //nestCache.insert({cmd->expr(i).sessionid()*10000+cmd->expr(i).label(), cachedReq});
+            nestCache.insert(new struct nestKV(cmd->expr(i).sessionid()*10000+cmd->expr(i).label(), cachedReq));
           }
         }
-#endif
-        //				if (cmd->cmd()==2 && !drop) 
-        if (cmd->cmd()==2) 
+        if (cmd->cmd() == 1) // not to solve
+          continue;
+      } else {
+        break;
+      }
+      allexpr += cmd->expr_size();
+      //building nested branches here consuming too much memory
 #if SINGLE_BRANCH
-          allCmds.push_back(cmdDone);
+      std::shared_ptr<JitCmdv2> cmdDone =  std::make_shared<JitCmdv2>();
+      cmdDone->set_cmd(2);
+      for(int i = 0 ;i < 1;i++) {
+        JitRequest* targetReq = cmdDone->add_expr();
+        if (cmd->expr(i).direction() == 0) {
+          targetReq->set_kind(rgd::LNot);
+          targetReq->set_name("lnot");
+          targetReq->set_bits(1);
+          targetReq = targetReq->add_children();
+        }
+        if (cmd->expr(i).full() == 1) {
+          targetReq->CopyFrom(cmd->expr(i));
+        }
+      }
+#endif
+      // if (cmd->cmd()==2 && !drop) 
+      if (cmd->cmd()==2) 
+#if SINGLE_BRANCH
+        allCmds.push_back(cmdDone);
 #else
         allCmds.push_back(cmd);
 #endif
-      } while(suc);
-      delete rawInput;
-      close(fd);
-      printf("\rLoading In progress %d", ++i);
-      fflush(stdout);
-      if (allCmds.size() > LOADING_LIMIT)
-        break;
-    }
-    i = 0;
-    printf("all count is %d, drop count is %d record number is %lu allexpr is %d\n",allcount,dropcount,allCmds.size(),allexpr);
-    start_time = getTimeStamp();
-    //ProfilerStart("pro.log");
-    pthread_t threads[48];
-    pthread_attr_t attr;
-    struct thread_data td[48];
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-    for(int k  = 0; k < num_of_threads ; k++ ) {
-      td[k].thread_id = k;
-      td[k].amount=allCmds.size();
-    }
-    cpu_set_t cpuset;
-    for(int k  = 0; k < num_of_threads; k++ ) {
-      pthread_create(&threads[k], &attr, rgdTask, (void *)&td[k]);
-      CPU_ZERO(&cpuset);
-      CPU_SET(k+core_start,&cpuset);
-      pthread_setaffinity_np(threads[k],sizeof(cpu_set_t), &cpuset);
-    }
-    pthread_attr_destroy(&attr);
-    for(int k = 0; k < num_of_threads; k++ ) {
-      pthread_join(threads[k], NULL);
-    }
-    std::cout << "processing number is " << i << std::endl;
-    std::cout << "elapsed time is " << getTimeStamp() - start_time << std::endl;
-    std::cout << "missed sub expr is " << misssubexprs << std::endl;
-    //ProfilerStop();
-    std::cout << "sol " << gFi 
-      << " ski " << skipped
-      << " iter " << iterations_total
-      << " sT " << solving_total
-      << " pT " << parsing_total 
-      << " parseMsgT  " << parsing1_total
-      << " irT " 	<< parsing2_total 
-      << " hit " << hit
-      << " mis " << miss << std::endl;
+    } while(ret);
+    delete rawInput;
+    close(fd);
+    printf("\rLoading in progress %d", ++i);
+    fflush(stdout);
+    if (allCmds.size() > LOADING_LIMIT)
+      break;
   }
+  i = 0;
+  printf("\nall count is %d, drop count is %d record number is %lu allexpr is %d\n",allcount,dropcount,allCmds.size(),allexpr);
+  start_time = getTimeStamp();
+  // ProfilerStart("pro.log");
+  pthread_t threads[48];
+  pthread_attr_t attr;
+  struct thread_data td[48];
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+  for(int k  = 0; k < num_of_threads ; k++ ) {
+    td[k].thread_id = k;
+    td[k].amount = allCmds.size();
+  }
+  cpu_set_t cpuset;
+  for(int k  = 0; k < num_of_threads; k++ ) {
+    pthread_create(&threads[k], &attr, rgdTask, (void *)&td[k]);
+    CPU_ZERO(&cpuset);
+    CPU_SET(k+core_start, &cpuset);
+    pthread_setaffinity_np(threads[k], sizeof(cpu_set_t), &cpuset);
+  }
+  pthread_attr_destroy(&attr);
+  for(int k = 0; k < num_of_threads; k++ ) {
+    pthread_join(threads[k], NULL);
+  }
+  std::cout << "processing number is " << i << std::endl;
+  std::cout << "elapsed time is " << getTimeStamp() - start_time << std::endl;
+  std::cout << "missed sub expr is " << misssubexprs << std::endl;
+  // ProfilerStop();
+  std::cout << "sol " << gFi 
+    << " ski " << skipped
+    << " iter " << iterations_total
+    << " sT " << solving_total
+    << " pT " << parsing_total 
+    << " parseMsgT  " << parsing1_total
+    << " irT " 	<< parsing2_total 
+    << " hit " << hit
+    << " mis " << miss << std::endl;
+}
 
-  int main(int argc, char** argv) {
-    int num_of_threads = 0;
-    int pin_core_start = 0;
-    if (argc < 4) {
-      printf("Use: ./rgd number_of_threads pin_core_start directory\n");
-      printf("Example: ./rgd 32 0 0 test_dir\n");
-      return 0;
-    }
-    if (sscanf (argv[1], "%i", &num_of_threads) != 1) {
-      fprintf(stderr, "error - not an integer, aborting...\n");
-      return 0;
-    }
-    if (sscanf (argv[2], "%i", &pin_core_start) != 1) {
-      fprintf(stderr, "error - not an integer, aborting...\n");
-      return 0;
-    }
-    std::cout << " number of threads " << num_of_threads << std::endl;
-    std::cout << " pin_core_start " << pin_core_start << std::endl;
-    core_start = pin_core_start;
-    ReplayLocal(argv, num_of_threads);
+int main(int argc, char** argv) {
+  int num_of_threads = 0;
+  int pin_core_start = 0;
+  if (argc < 4) {
+    std::cerr << "Use: ./rgd number_of_threads pin_core_start directory\n";
+    std::cerr << "Example: ./rgd 32 0 0 test_dir\n";
     return 0;
   }
+  if (sscanf (argv[1], "%i", &num_of_threads) != 1) {
+    std::cerr << "error - not an integer, aborting...\n";
+    return 0;
+  }
+  if (sscanf (argv[2], "%i", &pin_core_start) != 1) {
+    std::cerr << "error - not an integer, aborting...\n";
+    return 0;
+  }
+  std::cout << " number of threads " << num_of_threads << std::endl;
+  std::cout << " pin_core_start " << pin_core_start << std::endl;
+  core_start = pin_core_start;
+  ReplayLocal(argv, num_of_threads);
+  return 0;
+}
