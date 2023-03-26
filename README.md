@@ -3,7 +3,7 @@
 **Build**
 ```
 mkdir build 
-cd build && make
+cd build && camke .. && make
 ```
 
 **Using Docker**
