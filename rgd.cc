@@ -332,163 +332,74 @@ for (int i = 0; i < request->children_size(); i++)
   analyzeExpr(request->mutable_children(i), hasIte, abWidth, ++depth, nonRootLNot, div, hasZExt, zext_bool, expr_cache);
 }
 
-//global map: request->index() -> index in the Inputs. Inputs maps offset -> iv or 0
-// input_args: false, iv for const  / true, gidx for index in the  inputs
+// map the inputs to a constraint to the input array so as to maximize
+// the reusability of the constraint (e.g., a > b, c > d can use the same
+// JIT'ed function)
 static void mapArgs(JitRequest* req, 
     std::shared_ptr<Constraint> constraint,
     std::unordered_set<uint32_t> &visited) {
 
-  for (int i=0; i < req->children_size(); i++) {
+  for (int i = 0; i < req->children_size(); i++) {
     auto child = req->mutable_children(i);
     uint32_t label = child->label();
-    if (label!=0 && visited.count(label)==1)
+    if (label != 0 && visited.count(label) == 1)
       continue;
     visited.insert(label);
     mapArgs(child, constraint ,visited);
   }
-  XXH32_state_t state;
-  XXH32_reset(&state,0);
+
   uint32_t hash = 0;
   uint32_t bits = req->bits();
   uint32_t kind = req->kind();
-  //XXH32_update(&state, &bits, sizeof(bits));
-  //if (req->kind() < rgd::Equal || req->kind() > rgd::Sge)
-    //XXH32_update(&state, &kind, sizeof(kind));
+
   if (req->kind() == rgd::Constant) {
     uint32_t start = (uint32_t)constraint->input_args.size();
-    req->set_index(start);  //save index
+    req->set_index(start); //save index
     llvm::StringRef ref(req->value());
     llvm::APInt value(req->bits(), ref, 10);
     uint64_t iv = value.getZExtValue();
     constraint->input_args.push_back(std::make_pair(false,iv));
     constraint->const_num += 1;
-    //build index by local index
-    //XXH32_update(&state,&start,sizeof(start));
-    //req->set_hash(XXH32_digest(&state));
     hash = xxhash(bits, kind, start);
     req->set_hash(hash);
-  }
-  else if (req->kind() == rgd::Read) {
-    //search from current input
+  } else if (req->kind() == rgd::Read) {
+    // search from current input
     uint64_t iv = 0;
     if (!req->value().empty()) {
       llvm::StringRef ref(req->value());
       llvm::APInt value(req->bits(),ref,10);
       iv = value.getZExtValue();
     }
-    size_t length = req->bits()/8;
-    for (int i=0;i<length;++i, iv>>=8) {
-      uint32_t offset = req->index() + i;
+    uint32_t offset = req->index();
+    size_t length = req->bits() / 8;
+    for (int i = 0; i < length; ++i, ++offset, iv >>= 8) {
       uint32_t arg_index = 0;
       auto itr = constraint->local_map.find(offset);
-      if ( itr == constraint->local_map.end()) {
+      if (itr == constraint->local_map.end()) {
         arg_index = (uint32_t)constraint->input_args.size();
-        constraint->inputs.insert({offset,(uint8_t)(iv & 0xff)});
+        constraint->inputs.insert({offset, (uint8_t)(iv & 0xff)});
         constraint->local_map[offset] = arg_index;
-        constraint->input_args.push_back(std::make_pair(true,0)); // 0 is to be filled in the aggragation
+        constraint->input_args.push_back(std::make_pair(true, 0)); // 0 is to be filled in the aggragation
+        if (i == 0) {
+          constraint->shapes[offset] = length;
+        } else {
+          constraint->shapes[offset] = 0;
+        }
       } else {
         arg_index = itr->second;
       }
-      //if (i==0) {
-      //XXH32_update(&state,&arg_index,sizeof(arg_index));
-      //req->set_hash(XXH32_digest(&state));
-
       hash = xxhash(bits, kind, arg_index);
       req->set_hash(hash);
-      // }
     }
   } else {
     if (req->kind() < rgd::Equal || req->kind() > rgd::Sge)
-    //XXH32_update(&state, &kind, sizeof(kind));
       hash = xxhash(bits, kind, 0);
     for (int32_t i = 0; i < req->children_size(); i++) {
       uint32_t h = req->children(i).hash();
-      //XXH32_update(&state,&h,sizeof(h));
       hash = xxhash(hash, h, 0);
     }
-    //req->set_hash(XXH32_digest(&state));
     req->set_hash(hash);
   }
-}
-
-
-//global map: request->index() -> index in the MutInput::value
-//local map:  request->index() -> indices in the fut->scatch_args
-//constant_values: u8 value -> indices in the fut->scratch_args
-static void analyzeExpr(JitRequest* request, 
-    std::map<uint32_t, std::vector<uint32_t>> &local_map,
-    std::map<uint32_t, uint32_t> &global_map,
-    uint32_t &last_offset,
-    std::vector<std::pair<uint8_t,uint32_t>> &constant_values,
-    bool &hasIte, bool &abWidth, int depth, bool &nonRootLNot,
-    bool &div, bool &hasZExt, bool &zext_bool,
-    std::unordered_map<uint32_t, JitRequest*> &expr_cache) {
-
-  auto r1 = expr_cache.find(request->label());
-
-  if (request->label() != 0 && r1 == expr_cache.end())
-    expr_cache.insert({request->label(),request});
-  else if (request->label() != 0 &&
-      r1 != expr_cache.end()) {
-    request = expr_cache[request->label()];
-  }
-
-  if (request->bits() > 64) abWidth = true;
-
-  //Constant mapping
-  if (request->kind() == rgd::Constant) {
-    //request->set_index(last_offset);  //we abuse the index field of constant to store offsets in the input array  //we don't need this
-    uint32_t start = last_offset;
-    uint32_t length = request->bits() / 8;
-    last_offset += length;
-    llvm::StringRef ref(request->value());
-    llvm::APInt value(request->bits(), ref, 10);
-    uint64_t iv = value.getZExtValue();
-    uint8_t buf[8];
-    memcpy(buf, &iv, length);
-    for(uint32_t i = 0; i < length; i++) {
-      // std::cout<<(int)buf[i]<<", ";
-      constant_values.push_back({buf[i],start+i});
-    }
-    // std::cout<<std::endl;
-  } else if (request->kind() == rgd::Read) {
-    //llvm::StringRef ref(request->value());
-    //llvm::APInt value(request->bits(), ref, 10);
-    //uint8_t iv = (uint8_t)value.getZExtValue();
-    size_t length = request->bits()/8;
-    uint32_t start = last_offset;
-    for (int i=0;i<length;++i) {
-      if (global_map.find(request->index()+i) == global_map.end()){
-        size_t gsize = global_map.size();
-        global_map[request->index()+i] = gsize;
-      }
-      if (local_map.find(request->index()+i) == local_map.end()) {
-        //size_t lsize = local_map.size();
-        local_map[request->index()+i] = {start+i};
-      } else
-        local_map[request->index()+i].push_back(start+i);
-    }
-    last_offset += length;
-  } else if (request->kind() == rgd::Ite) {
-    hasIte = true;
-  } else if (request->kind() == rgd::ZExt) {
-    hasZExt = true;
-  }  /*else if (request->kind() == rgd::UDiv
-       || request->kind() == rgd::SDiv
-       || request->kind() == rgd::SRem
-       || request->kind() == rgd::URem) {
-       div = true;
-       }  */ else if (isRelational(request->kind())) {
-         if (hasZExt)
-           zext_bool = true;
-       } else if (request->kind() == rgd::LNot) {
-         if (depth != 0)
-           nonRootLNot = true;
-       }
-
-for (int i = 0; i < request->children_size(); i++)
-  analyzeExpr(request->mutable_children(i), local_map, global_map, last_offset,
-      constant_values, hasIte, abWidth, ++depth, nonRootLNot, div, hasZExt, zext_bool ,expr_cache);
 }
 
 static const JitRequest* transform(const JitRequest* request, int &constraint) {

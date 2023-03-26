@@ -29,9 +29,6 @@ using namespace rgd;
 
 std::unique_ptr<GradJit> JIT;
 
-//the first two slots of the arguments for reseved for the left and right operands
-const int RET_OFFSET = 2;
-
 static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
     const JitRequest* request,
     std::unordered_map<uint32_t, uint32_t> &local_map, llvm::Value* arg,
@@ -55,7 +52,6 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
 
   switch (request->kind()) {
     case rgd::Bool: {
-      //std::cout << "bool codegen" << std::endl;
       // getTrue is actually 1 bit integer 1
       if (request->boolvalue())
         ret = llvm::ConstantInt::getTrue(Builder.getContext());
@@ -64,7 +60,7 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::Constant: {
-      //The constant is now loading from arguments
+      // The constant is now loading from arguments
       uint32_t start = request->index();
       uint32_t length = request->bits() / 8;
 

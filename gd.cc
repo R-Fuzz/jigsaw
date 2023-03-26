@@ -22,9 +22,42 @@ void dumpResults(MutInput &input, struct FUT* fut) {
 
 void addResults(MutInput &input, struct FUT* fut) {
   int i = 0;
+  // since we used a trick (allow each byte to overflow and then use add instead
+  // of bitwise or to concatenate, so the overflow would be visible)
+  // to allow us to manipulate each byte individually during gradient descent,
+  // we need to do a bit more work to get the final result
+
+  // first, we order the inputs by their offset
+  std::map<uint32_t, uint64_t> ordered_inputs;
   for (auto it : fut->inputs) {
-    (*fut->rgd_solution)[it.first] = input.value[i];
+    ordered_inputs[it.first] = input.value[i];
     i++;
+  }
+
+  // next, convert the ordered inputs to a vector for easier access
+  std::vector<std::pair<uint32_t, uint64_t> > ordered_inputs_v;
+  for (const auto& pair : ordered_inputs) {
+    ordered_inputs_v.push_back(pair);
+  }
+
+  // finally, we calculate the final result
+  uint32_t length = 1;
+  uint64_t result = 0;
+  uint32_t start = 0;
+  for (i = 0; i < ordered_inputs_v.size();) {
+    start = ordered_inputs_v[i].first;
+    result = ordered_inputs_v[i].second;
+    length = fut->shapes[start];
+    if (length == 0) { ++i; continue; }
+    // first, concatenate the bytes according to the shape
+    for (int j = 1; j < length; ++j) {
+      result += (ordered_inputs_v[i + j].second << (8 * j));
+    }
+    // then extract the correct values, little endian
+    for (int j = 0; j < length; ++j) {
+      (*fut->rgd_solution)[start + j] = (uint8_t)((result >> (8 * j)) & 0xff);
+    }
+    i += length;
   }
 }
 
@@ -39,7 +72,7 @@ void addOptiResults(MutInput &input, struct FUT* fut) {
 
 
 inline uint64_t sat_inc(uint64_t base, uint64_t inc) {
-  return base+inc < base ? -1 : base+inc;
+  return base + inc < base ? -1 : base + inc;
 }
 
 
@@ -47,44 +80,44 @@ uint64_t getDistance(uint32_t comp, uint64_t a, uint64_t b) {
   uint64_t dis = 0;
   switch (comp) {
     case rgd::Equal:
-      if (a>=b) dis = a-b;
-      else dis=b-a;
+      if (a >= b) dis = a - b;
+      else dis = b - a;
       break;
     case rgd::Distinct:
-      if (a==b) dis = 1;
+      if (a == b) dis = 1;
       else dis = 0;
       break;
     case rgd::Ult:
-      if (a<b) dis = 0;
-      else dis = sat_inc(a-b,1);
+      if (a < b) dis = 0;
+      else dis = sat_inc(a - b, 1);
       break;
     case rgd::Ule:
-      if (a<=b) dis = 0;
-      else dis = a-b;
+      if (a <= b) dis = 0;
+      else dis = a - b;
       break;
     case rgd::Ugt:
-      if (a>b) dis = 0;
-      else dis = sat_inc(b-a,1);
+      if (a > b) dis = 0;
+      else dis = sat_inc(b - a, 1);
       break;
     case rgd::Uge:
-      if (a>=b) dis = 0;
-      else dis = b-a;
+      if (a >= b) dis = 0;
+      else dis = b - a;
       break;
     case rgd::Slt:
       if ((int64_t)a < (int64_t)b) return 0;
-      else dis = sat_inc(a-b,1);
+      else dis = sat_inc(a - b, 1);
       break;
     case rgd::Sle:
       if ((int64_t)a <= (int64_t)b) return 0;
-      else dis = a-b;
+      else dis = a - b;
       break;
     case rgd::Sgt:
       if ((int64_t)a > (int64_t)b) return 0;
-      else dis = sat_inc(b-a,1);
+      else dis = sat_inc(b - a, 1);
       break;
     case rgd::Sge:
       if ((int64_t)a >= (int64_t)b) return 0;
-      else dis = b-a;
+      else dis = b - a;
       break;
     default:
       assert(0);
@@ -99,9 +132,9 @@ void single_distance(MutInput &input, struct FUT* fut, int index) {
     int arg_idx = 0;
     for (auto arg : fut->constraints[cons_id]->input_args) {
       if (arg.first) {// symbolic
-        fut->scratch_args[2+arg_idx] = (uint64_t)input.value[arg.second];
+        fut->scratch_args[2 + arg_idx] = (uint64_t)input.value[arg.second];
       } else {
-        fut->scratch_args[2+arg_idx] = arg.second;
+        fut->scratch_args[2 + arg_idx] = arg.second;
       }
       ++arg_idx;
     }
@@ -120,19 +153,20 @@ uint64_t distance(MutInput &input, struct FUT* fut) {
   uint64_t dis0 = 0;
 
   for (int i = 0; i < fut->constraints.size(); i++) {
-    //mapping symbolic args
+    // mapping symbolic args
     int arg_idx = 0;
     std::shared_ptr<Constraint> c = fut->constraints[i];
     for (auto arg : fut->constraints[i]->input_args) {
-      if (arg.first) {// symbolic
-        fut->scratch_args[2+arg_idx] = (uint64_t)input.value[arg.second];
+      if (arg.first) { // symbolic
+        fut->scratch_args[2 + arg_idx] = (uint64_t)input.value[arg.second];
       } else {
-        fut->scratch_args[2+arg_idx] = arg.second;
+        fut->scratch_args[2 + arg_idx] = arg.second;
       }
       ++arg_idx;
     }
-    //for(int p=0;p<fut->n_sym_args+fut->n_const_args;p++) std::cout << (int)fut->scratch_args[p]<<", ";
-    //std::cout << std::endl;
+    // for(int p=0;p<fut->n_sym_args+fut->n_const_args;p++)
+    //   std::cout << (int)fut->scratch_args[p]<<", ";
+    // std::cout << std::endl;
     c->fn(fut->scratch_args);
     uint64_t dis = getDistance(c->comparison, fut->scratch_args[0], fut->scratch_args[1]);
     fut->distances[i] = dis;

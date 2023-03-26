@@ -14,6 +14,9 @@
 // constraint: 0 = equal, 1 = distinct, 2 = lt, 3 = le, 4 = gt, 5 = ge 
 typedef void(*test_fn_type)(uint64_t*);
 
+//the first two slots of the arguments for reseved for the left and right operands
+static const int RET_OFFSET = 2;
+
 class Constraint {
 public:
   // JIT'ed function for a comparison expression
@@ -33,9 +36,9 @@ public:
   // to load the input values into the input array.
   std::vector<std::pair<bool, uint64_t>> input_args;
   // map the offset to iv (initial value)
-  std::unordered_map<uint32_t,uint8_t> inputs;
+  std::unordered_map<uint32_t, uint8_t> inputs;
   // shape information about the input (e.g., 1, 2, 4, 8 bytes)
-  std::unordered_map<uint32_t,uint32_t> shapes;
+  std::unordered_map<uint32_t, uint32_t> shapes;
   // number of constant in the input array
   uint32_t const_num;
 };
@@ -54,7 +57,9 @@ struct FUT {
   std::vector<std::shared_ptr<Constraint>> constraints;
 
   // inputs as pairs of <offset (from the beginning of the input, and value>
-  std::vector<std::pair<uint32_t,uint8_t>> inputs;
+  std::vector<std::pair<uint32_t, uint8_t>> inputs;
+  // shape information at each offset
+  std::unordered_map<uint32_t, uint32_t> shapes;
   // max number of constants in the input array
   uint32_t max_const_num;
   // record constraints that use a certain input byte
@@ -76,9 +81,9 @@ struct FUT {
   bool opti_hit = false;
 
   // solutions
-  std::unordered_map<uint32_t,uint8_t> *rgd_solution;
-  std::unordered_map<uint32_t,uint8_t> *opti_solution;
-  std::unordered_map<uint32_t,uint8_t> *hint_solution;
+  std::unordered_map<uint32_t, uint8_t> *rgd_solution;
+  std::unordered_map<uint32_t, uint8_t> *opti_solution;
+  std::unordered_map<uint32_t, uint8_t> *hint_solution;
 
   void finalize() {
     // aggregate the contraints, map each input byte to a constraint to
@@ -92,6 +97,7 @@ struct FUT {
           gidx = inputs.size();
           sym_map[offset] = gidx;
           inputs.push_back(std::make_pair(offset, constraints[i]->inputs[offset]));
+          shapes[offset] = constraints[i]->shapes[offset];
         } else {
           gidx = gitr->second;
         }
@@ -129,4 +135,5 @@ struct FUT {
   }
 
 };
-#endif
+
+#endif // TEST_H_
