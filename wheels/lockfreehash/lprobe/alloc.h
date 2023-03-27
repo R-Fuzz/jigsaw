@@ -337,7 +337,7 @@ namespace pbbs {
     E* r = new_array_no_init<E>(n);
     if (!std::is_trivially_default_constructible<E>::value) 
       parallel_for(0, n, [&] (size_t i) {
-	  new ((void*) (r+i)) E;});
+        new ((void*) (r+i)) E;});
     return r;
   }
 
@@ -351,7 +351,10 @@ namespace pbbs {
     // C++14 -- supported by gnu C++11
     if (!std::is_trivially_destructible<E>::value)
       parallel_for(0, n, [&] (size_t i) {
-	  A[i].~E();});
+        A[i].~E();});
+    else if (std::is_pointer<E>::value)
+      parallel_for(0, n, [&] (size_t i) {
+        if (A[i] != nullptr) delete A[i];});
     my_free(A);
   }
 }

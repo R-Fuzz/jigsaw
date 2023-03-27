@@ -305,7 +305,7 @@ static void analyzeExpr(JitRequest* request, bool &hasIte, bool &abWidth, int de
   auto r1 = expr_cache.find(request->label());
 
   if (request->label() != 0 && r1 == expr_cache.end())
-    expr_cache.insert({request->label(),request});
+    expr_cache.insert({request->label(), request});
   else if (request->label() != 0 &&
       r1 != expr_cache.end()) {
     request = expr_cache[request->label()];
@@ -338,7 +338,7 @@ for (int i = 0; i < request->children_size(); i++)
 // the reusability of the constraint (e.g., a > b, c > d can use the same
 // JIT'ed function)
 static void mapArgs(JitRequest* req, 
-    std::shared_ptr<Constraint> constraint,
+    std::shared_ptr<Constraint> &constraint,
     std::unordered_set<uint32_t> &visited) {
 
   for (int i = 0; i < req->children_size(); i++) {
@@ -698,16 +698,14 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
     copied_req->CopyFrom(*adjusted_request);
 
     struct myKV *res = fCache.find(copied_req);
-    //  struct myKV *res = nullptr;
     if (res == nullptr) {
       miss++;
       uint64_t id = ++uuid;
       addFunction(adjusted_request, constraint->local_map, id, expr_cache);
       auto fn = performJit(id);
-      if (!fCache.insert(new struct myKV(copied_req, fn))) {
-        delete res;
-        res = nullptr;
-      }
+      auto kv = new struct myKV(copied_req, fn);
+      if (!fCache.insert(kv))
+        delete kv;
       constraint->fn = fn;
     } else {
       hit++;
@@ -717,7 +715,9 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
     assert(isRelational(adjusted_request->kind()) && "non-relational expr");
     fut->constraints.push_back(constraint);
 #if CONSTRAINT_CACHE
-    consCache.insert(new struct consKV({adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind()},constraint));
+    auto kv = new struct consKV({adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind()}, constraint);
+    if (!consCache.insert(kv))
+      delete kv;
     //temp.insert({adjusted_request->sessionid()*1000000+adjusted_request->label()*100+adjusted_request->kind(), constraint});
 #endif
   }
@@ -1202,7 +1202,9 @@ void ReplayLocal(char** argv, int num_of_threads) {
             std::shared_ptr<JitRequest> cachedReq = std::make_shared<JitRequest>();
             cachedReq->CopyFrom(cmd->expr(i));
             //nestCache.insert({cmd->expr(i).sessionid()*10000+cmd->expr(i).label(), cachedReq});
-            nestCache.insert(new struct nestKV(cmd->expr(i).sessionid()*10000+cmd->expr(i).label(), cachedReq));
+            auto kv = new struct nestKV(cmd->expr(i).sessionid()*10000+cmd->expr(i).label(), cachedReq);
+            if (!nestCache.insert(kv))
+              delete kv;
           }
         }
         if (cmd->cmd() == 1) // not to solve
