@@ -41,7 +41,7 @@
 #define XXH_STATIC_LINKING_ONLY
 #include "xxhash.h"
 #define DEBUG 0
-#define CONSTRAINT_CACHE 0
+#define CONSTRAINT_CACHE 1
 #define CHECK_DIS 0
 #define CODEGEN_V2 1
 #define THREAD_POOL_SIZE 0

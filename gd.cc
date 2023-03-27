@@ -159,8 +159,10 @@ static uint64_t getDistance(uint32_t comp, uint64_t a, uint64_t b) {
 void single_distance(MutInput &input, struct FUT* fut, int index) {
   // only re-compute the distance of the constraints that are affected by the change
   for (uint32_t cons_id : fut->cmap[index]) {
+    auto& c = fut->constraints[cons_id];
+    auto& cm = fut->consmeta[cons_id];
     int arg_idx = 0;
-    for (auto arg : fut->constraints[cons_id]->input_args) {
+    for (auto arg : cm->input_args) {
       if (arg.first) {// symbolic
         fut->scratch_args[RET_OFFSET + arg_idx] = (uint64_t)input.value[arg.second];
       } else {
@@ -168,9 +170,8 @@ void single_distance(MutInput &input, struct FUT* fut, int index) {
       }
       ++arg_idx;
     }
-    fut->constraints[cons_id]->fn(fut->scratch_args);
-    uint64_t dis = getDistance(fut->constraints[cons_id]->comparison,
-      fut->scratch_args[0], fut->scratch_args[1]);
+    c->fn(fut->scratch_args);
+    uint64_t dis = getDistance(c->comparison, fut->scratch_args[0], fut->scratch_args[1]);
     fut->distances[cons_id] = dis;
   }
 }
@@ -183,10 +184,11 @@ uint64_t distance(MutInput &input, struct FUT* fut) {
   uint64_t dis0 = 0;
 
   for (int i = 0; i < fut->constraints.size(); i++) {
+    auto& c = fut->constraints[i];
+    auto& cm = fut->consmeta[i];
     // mapping symbolic args
     int arg_idx = 0;
-    std::shared_ptr<Constraint> c = fut->constraints[i];
-    for (auto arg : c->input_args) {
+    for (auto arg : cm->input_args) {
       if (arg.first) { // symbolic
         fut->scratch_args[RET_OFFSET + arg_idx] = (uint64_t)input.value[arg.second];
       } else {
@@ -200,8 +202,8 @@ uint64_t distance(MutInput &input, struct FUT* fut) {
     c->fn(fut->scratch_args);
     uint64_t dis = getDistance(c->comparison, fut->scratch_args[0], fut->scratch_args[1]);
     fut->distances[i] = dis;
-    c->op1 = fut->scratch_args[0];
-    c->op2 = fut->scratch_args[1];
+    cm->op1 = fut->scratch_args[0];
+    cm->op2 = fut->scratch_args[1];
     if (i == 0) dis0 = dis;
     /*
        if (dis == 0 && i == 0 && !fut->opti_hit) {
@@ -437,7 +439,7 @@ static uint64_t get_i2s_value(uint32_t comp, uint64_t v, bool rhs) {
 }
 
 
-static uint64_t try_new_i2s_value(std::shared_ptr<Constraint> c, uint64_t value, struct FUT* fut) {
+static uint64_t try_new_i2s_value(std::shared_ptr<const Constraint> &c, uint64_t value, struct FUT* fut) {
   int i = 0;
   for (auto const& [offset, lidx] : c->local_map) {
     uint64_t v = ((value >> i) & 0xff);
@@ -446,6 +448,8 @@ static uint64_t try_new_i2s_value(std::shared_ptr<Constraint> c, uint64_t value,
   }
   int arg_idx = 0;
   for (auto arg : c->input_args) {
+    // NOTE: using the constaints input_args here (instead of the consmeta's)
+    // is fine because the constants are always the same
     if (!arg.first) fut->scratch_args[RET_OFFSET + arg_idx] = arg.second;
     ++arg_idx;
   }
@@ -458,21 +462,22 @@ uint64_t try_i2s(MutInput &input_min, MutInput &temp_input, uint64_t f0, struct 
   temp_input = input_min;
   bool updated = false;
   for (int k = 0; k < fut->constraints.size(); k++) {
-    std::shared_ptr<Constraint> c = fut->constraints[k];
-    if (fut->distances[k] && c->i2s_feasible) {
+    auto& c = fut->constraints[k];
+    auto& cm = fut->consmeta[k];
+    if (fut->distances[k] && cm->i2s_feasible) {
       // check concatenated inputs against comparison operands
       // FIXME: add support for other input encodings
       uint64_t input = 0, input_r, value = 0, dis = -1;
       int i = 0, t = c->local_map.size() * 8;
       for (auto const& [offset, lidx] : c->local_map) {
-        input |= (input_min.get(c->input_args[lidx].second) << i);
-        input_r |= (input_min.get(c->input_args[lidx].second) << (t - i - 8));
+        input |= (input_min.get(cm->input_args[lidx].second) << i);
+        input_r |= (input_min.get(cm->input_args[lidx].second) << (t - i - 8));
         i += 8;
       }
-      if (input == c->op1) {
-        value = get_i2s_value(c->comparison, c->op2, true);
-      } else if (input == c->op2) {
-        value = get_i2s_value(c->comparison, c->op1, false);
+      if (input == cm->op1) {
+        value = get_i2s_value(c->comparison, cm->op2, true);
+      } else if (input == cm->op2) {
+        value = get_i2s_value(c->comparison, cm->op1, false);
       } else {
         goto try_reverse;
       }
@@ -482,7 +487,7 @@ uint64_t try_i2s(MutInput &input_min, MutInput &temp_input, uint64_t f0, struct 
       if (dis == 0) {
 #if DEBUG
         std::cout << "i2s updated c = " << k << " t = " << t << " input = " << input
-                  << " op1 = " << c->op1 << " op2 = " << c->op2
+                  << " op1 = " << cm->op1 << " op2 = " << cm->op2
                   << " cmp = " << c->comparison << " value = " << value
                   << " old-dis = " << fut->distances[k] << " new-dis = " << dis << std::endl;
 #endif
@@ -490,7 +495,7 @@ uint64_t try_i2s(MutInput &input_min, MutInput &temp_input, uint64_t f0, struct 
         i = 0;
         for (auto const& [offset, lidx] : c->local_map) {
           uint8_t v = ((value >> i) & 0xff);
-          temp_input.set(c->input_args[lidx].second, v);
+          temp_input.set(cm->input_args[lidx].second, v);
           i += 8;
         }
         updated = true;
@@ -499,10 +504,10 @@ uint64_t try_i2s(MutInput &input_min, MutInput &temp_input, uint64_t f0, struct 
 
 try_reverse:
       // try reverse encoding
-      if (input_r == c->op1) {
-        value = get_i2s_value(c->comparison, c->op2, true);
-      } else if (input_r == c->op2) {
-        value = get_i2s_value(c->comparison, c->op1, false);
+      if (input_r == cm->op1) {
+        value = get_i2s_value(c->comparison, cm->op2, true);
+      } else if (input_r == cm->op2) {
+        value = get_i2s_value(c->comparison, cm->op1, false);
       } else {
         continue;
       }
@@ -516,7 +521,7 @@ try_reverse:
         for (auto const& [offset, lidx] : c->local_map) {
           uint8_t v = ((value >> i) & 0xff);
           // uint8_t v = ((value >> (t - i - 8)) & 0xff);
-          temp_input.set(c->input_args[lidx].second, v);
+          temp_input.set(cm->input_args[lidx].second, v);
           i += 8;
         }
         updated = true;

@@ -17,8 +17,7 @@ typedef void(*test_fn_type)(uint64_t*);
 //the first two slots of the arguments for reseved for the left and right operands
 static const int RET_OFFSET = 2;
 
-class Constraint {
-public:
+struct Constraint {
   // JIT'ed function for a comparison expression
   test_fn_type fn;
   // the relational operator
@@ -41,24 +40,25 @@ public:
   std::unordered_map<uint32_t, uint32_t> shapes;
   // number of constant in the input array
   uint32_t const_num;
-
-  // input2state inference related
-  bool i2s_feasible;
-  uint64_t op1, op2;
 };
 
 
-class ConsMeta {
-public:
-  std::vector<std::pair<bool, uint64_t>> input_args_final;
-  uint32_t index;
+struct ConsMeta {
+  // per-FUT arg mapping, so we can share the constraints
+  std::vector<std::pair<bool, uint64_t>> input_args;
+  // input2state inference related
+  bool i2s_feasible;
+  uint64_t op1, op2;
 };
 
 struct FUT {
   FUT(): scratch_args(nullptr), max_const_num(0) {}
   ~FUT() { if (scratch_args) free(scratch_args); }
   uint32_t num_exprs;
-  std::vector<std::shared_ptr<Constraint>> constraints;
+  // constraints, could be shared, strictly read-only
+  std::vector<std::shared_ptr<const Constraint>> constraints;
+  // per-FUT mutable metadata of constraints
+  std::vector<std::unique_ptr<ConsMeta>> consmeta;
 
   // inputs as pairs of <offset (from the beginning of the input, and value>
   std::vector<std::pair<uint32_t, uint8_t>> inputs;
@@ -95,15 +95,17 @@ struct FUT {
     std::unordered_map<uint32_t, uint32_t> sym_map;
     uint32_t gidx = 0;
     for (size_t i = 0; i < constraints.size(); i++) {
+      std::unique_ptr<ConsMeta> cm = std::make_unique<ConsMeta>();
+      cm->input_args = constraints[i]->input_args;
       uint32_t last_offset = -1;
-      constraints[i]->i2s_feasible = true;
+      cm->i2s_feasible = true;
       for (const auto& [offset, lidx] : constraints[i]->local_map) {
         auto gitr = sym_map.find(offset);
         if (gitr == sym_map.end()) {
           gidx = inputs.size();
           sym_map[offset] = gidx;
-          inputs.push_back(std::make_pair(offset, constraints[i]->inputs[offset]));
-          shapes[offset] = constraints[i]->shapes[offset];
+          inputs.push_back(std::make_pair(offset, constraints[i]->inputs.at(offset)));
+          shapes[offset] = constraints[i]->shapes.at(offset);
         } else {
           gidx = gitr->second;
         }
@@ -117,28 +119,31 @@ struct FUT {
         // function is going to read the input from) and the global index
         // (i.e., where the current value corresponding to the input byte
         // is stored in MutInput)
-        constraints[i]->input_args[lidx].second = gidx;
+        cm->input_args[lidx].second = gidx;
 
         // check if the input bytes are consecutive
         // using std::map ensures that the offsets (keys) are sorted
         if (last_offset != -1 && last_offset + 1 != offset) {
-          constraints[i]->i2s_feasible = false;
+          cm->i2s_feasible = false;
         }
         last_offset = offset;
       }
       // FIXME: only support up to 64-bit for now
       if (constraints[i]->local_map.size() > 8) {
-        constraints[i]->i2s_feasible = false;
+        cm->i2s_feasible = false;
       }
 
       // update the number of required constants in the input array
       if (max_const_num < constraints[i]->const_num)
         max_const_num = constraints[i]->const_num;
+
+      // insert the constraint metadata
+      consmeta.push_back(std::move(cm));
     }
 
     // allocate the input array, reserver 2 for comparison operands a,b
-    scratch_args = (uint64_t*)aligned_alloc(64,
-        (2 + inputs.size() + max_const_num + 100) * sizeof(uint64_t));
+    scratch_args = (uint64_t*)aligned_alloc(sizeof(*scratch_args),
+        (2 + inputs.size() + max_const_num + 1) * sizeof(*scratch_args));
     orig_distances.resize(constraints.size(), 0);
     distances.resize(constraints.size(), 0);
   }
