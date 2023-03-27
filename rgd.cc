@@ -41,7 +41,7 @@
 #define XXH_STATIC_LINKING_ONLY
 #include "xxhash.h"
 #define DEBUG 0
-#define CONSTRAINT_CACHE 1
+#define CONSTRAINT_CACHE 0
 #define CHECK_DIS 0
 #define CODEGEN_V2 1
 #define THREAD_POOL_SIZE 0
@@ -693,7 +693,7 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
     std::shared_ptr<Constraint> constraint = std::make_shared<Constraint>();
     constraint->const_num = 0;
     constraint->comparison = adjusted_request->kind();
-    mapArgs(adjusted_request,constraint,visited);
+    mapArgs(adjusted_request, constraint, visited);
     std::shared_ptr<JitRequest> copied_req = std::make_shared<JitRequest>();
     copied_req->CopyFrom(*adjusted_request);
 
@@ -716,8 +716,10 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
 
     assert(isRelational(adjusted_request->kind()) && "non-relational expr");
     fut->constraints.push_back(constraint);
+#if CONSTRAINT_CACHE
     consCache.insert(new struct consKV({adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind()},constraint));
     //temp.insert({adjusted_request->sessionid()*1000000+adjusted_request->label()*100+adjusted_request->kind(), constraint});
+#endif
   }
 
   uint64_t parsing2 = getTimeStamp()-start;
@@ -773,8 +775,6 @@ static void parseRequest(bool opti, std::shared_ptr<JitCmdv2> cmd, int threadId,
   std::deque<std::deque<JitRequest*>> ReqList;
   std::deque<std::deque<JitRequest*>> res;
   std::deque<std::deque<JitRequest*>> single;
-  static int count = 0;
-  count++;
 
   int n_expr = opti?1:cmd->expr_size();
   for (int i = 0; i < n_expr; i++) {
