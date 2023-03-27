@@ -5,7 +5,7 @@
 #include "test.h"
 
 int addFunction(const rgd::JitRequest* request,
-    std::unordered_map<uint32_t, uint32_t> &local_map,
+    std::map<uint32_t, uint32_t> &local_map,
     uint64_t id,
     std::unordered_map<uint32_t, rgd::JitRequest*> &expr_cache);
 

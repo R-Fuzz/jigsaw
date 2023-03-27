@@ -31,7 +31,7 @@ std::unique_ptr<GradJit> JIT;
 
 static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
     const JitRequest* request,
-    std::unordered_map<uint32_t, uint32_t> &local_map, llvm::Value* arg,
+    std::map<uint32_t, uint32_t> &local_map, llvm::Value* arg,
     std::unordered_map<uint32_t, llvm::Value*> &value_cache,
     std::unordered_map<uint32_t, JitRequest*> &expr_cache) {
   llvm::Value* ret = nullptr;
@@ -78,11 +78,11 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       llvm::Value* idx[1];
       idx[0] = llvm::ConstantInt::get(Builder.getInt32Ty(), start + RET_OFFSET);
       ret = Builder.CreateLoad(Builder.CreateGEP(arg, idx));
-      for(uint32_t k = 1; k < length; k++) {
+      for (uint32_t k = 1; k < length; k++) {
         idx[0] = llvm::ConstantInt::get(Builder.getInt32Ty(), start + k + RET_OFFSET);
         llvm::Value* tmp = Builder.CreateLoad(Builder.CreateGEP(arg,idx));
         tmp = Builder.CreateShl(tmp, 8 * k);
-        ret = Builder.CreateAdd(ret,tmp);
+        ret = Builder.CreateAdd(ret, tmp);
       }
       ret = Builder.CreateTrunc(ret,
           llvm::Type::getIntNTy(Builder.getContext(), request->bits()));
@@ -518,7 +518,7 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
 }
 
 int addFunction(const JitRequest* request,
-    std::unordered_map<uint32_t,uint32_t> &local_map,
+    std::map<uint32_t,uint32_t> &local_map,
     uint64_t id,
     std::unordered_map<uint32_t,JitRequest*> &expr_cache) {
 

@@ -50,6 +50,8 @@
 #define LOADING_LIMIT 1000000
 #define PROCESSING_LIMIT 1000000
 
+typedef unsigned __int128 uint128_t;
+
 using namespace pbbs;
 using namespace llvm;
 using namespace llvm::orc;
@@ -345,7 +347,7 @@ static void mapArgs(JitRequest* req,
     if (label != 0 && visited.count(label) == 1)
       continue;
     visited.insert(label);
-    mapArgs(child, constraint ,visited);
+    mapArgs(child, constraint, visited);
   }
 
   uint32_t hash = 0;
@@ -367,7 +369,7 @@ static void mapArgs(JitRequest* req,
     uint64_t iv = 0;
     if (!req->value().empty()) {
       llvm::StringRef ref(req->value());
-      llvm::APInt value(req->bits(),ref,10);
+      llvm::APInt value(req->bits(), ref, 10);
       iv = value.getZExtValue();
     }
     uint32_t offset = req->index();

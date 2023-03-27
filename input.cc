@@ -38,7 +38,7 @@ void MutInput::flip(size_t index, size_t bit_index) {
   value[index] = val^mask;
 }
 
-void MutInput::set(size_t index, uint8_t val)
+void MutInput::set(const size_t index, uint8_t val)
 {
   value[index] = val;
 }
@@ -71,7 +71,7 @@ void MutInput::randomize() {
   }
 }
 
-uint8_t MutInput::get(size_t i) {
+uint8_t MutInput::get(const size_t i) {
   return value[i];
 }
 

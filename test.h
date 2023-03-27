@@ -29,7 +29,7 @@ public:
   // function consumes inputs as an input array.  So, when building the
   // function, we need to map the offset to the idx in input array,
   // which is stored in local_map.
-  std::unordered_map<uint32_t, uint32_t> local_map;
+  std::map<uint32_t, uint32_t> local_map;
   // if const {false, const value}, if symbolic {true, index in the inputs}
   // during local search, we use a single global array (to avoid memory
   // allocation and free) to prepare the inputs, so we need to know where
@@ -41,6 +41,10 @@ public:
   std::unordered_map<uint32_t, uint32_t> shapes;
   // number of constant in the input array
   uint32_t const_num;
+
+  // input2state inference related
+  bool i2s_feasible;
+  uint64_t op1, op2;
 };
 
 
@@ -88,9 +92,11 @@ struct FUT {
   void finalize() {
     // aggregate the contraints, map each input byte to a constraint to
     // an index in the "global" input array (i.e., the scratch_args)
-    std::unordered_map<uint32_t,uint32_t> sym_map;
+    std::unordered_map<uint32_t, uint32_t> sym_map;
     uint32_t gidx = 0;
     for (size_t i = 0; i < constraints.size(); i++) {
+      uint32_t last_offset = -1;
+      constraints[i]->i2s_feasible = true;
       for (const auto& [offset, lidx] : constraints[i]->local_map) {
         auto gitr = sym_map.find(offset);
         if (gitr == sym_map.end()) {
@@ -112,6 +118,17 @@ struct FUT {
         // (i.e., where the current value corresponding to the input byte
         // is stored in MutInput)
         constraints[i]->input_args[lidx].second = gidx;
+
+        // check if the input bytes are consecutive
+        // using std::map ensures that the offsets (keys) are sorted
+        if (last_offset != -1 && last_offset + 1 != offset) {
+          constraints[i]->i2s_feasible = false;
+        }
+        last_offset = offset;
+      }
+      // FIXME: only support up to 64-bit for now
+      if (constraints[i]->local_map.size() > 8) {
+        constraints[i]->i2s_feasible = false;
       }
 
       // update the number of required constants in the input array

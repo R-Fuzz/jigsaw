@@ -10,6 +10,19 @@
 #define likely(x)       __builtin_expect(!!(x), 1)
 #define unlikely(x)     __builtin_expect(!!(x), 0)
 
+#define SWAP64(_x)                                                             \
+  ({                                                                           \
+                                                                               \
+    uint64_t _ret = (_x);                                                           \
+    _ret =                                                                     \
+        (_ret & 0x00000000FFFFFFFF) << 32 | (_ret & 0xFFFFFFFF00000000) >> 32; \
+    _ret =                                                                     \
+        (_ret & 0x0000FFFF0000FFFF) << 16 | (_ret & 0xFFFF0000FFFF0000) >> 16; \
+    _ret =                                                                     \
+        (_ret & 0x00FF00FF00FF00FF) << 8 | (_ret & 0xFF00FF00FF00FF00) >> 8;   \
+    _ret;                                                                      \
+                                                                               \
+  })
 
 void dumpResults(MutInput &input, struct FUT* fut) {
   int i = 0;
@@ -76,7 +89,24 @@ inline uint64_t sat_inc(uint64_t base, uint64_t inc) {
 }
 
 
-uint64_t getDistance(uint32_t comp, uint64_t a, uint64_t b) {
+static uint32_t negate(uint32_t op) {
+  switch (op) {
+    case rgd::Equal: return rgd::Distinct;
+    case rgd::Distinct: return rgd::Equal;
+    case rgd::Sge: return rgd::Slt;
+    case rgd::Sgt:  return rgd::Sle;
+    case rgd::Sle:  return rgd::Sgt;
+    case rgd::Slt:  return rgd::Sge;
+    case rgd::Uge:  return rgd::Ult;
+    case rgd::Ugt:  return rgd::Ule;
+    case rgd::Ule:  return rgd::Ugt;
+    case rgd::Ult:  return rgd::Uge;
+    assert(false && "Non-relational op!");
+  };
+}
+
+
+static uint64_t getDistance(uint32_t comp, uint64_t a, uint64_t b) {
   uint64_t dis = 0;
   switch (comp) {
     case rgd::Equal:
@@ -120,7 +150,7 @@ uint64_t getDistance(uint32_t comp, uint64_t a, uint64_t b) {
       else dis = b - a;
       break;
     default:
-      assert(0);
+      assert(false && "Non-relational op!");
   }
   return dis;
 }
@@ -132,9 +162,9 @@ void single_distance(MutInput &input, struct FUT* fut, int index) {
     int arg_idx = 0;
     for (auto arg : fut->constraints[cons_id]->input_args) {
       if (arg.first) {// symbolic
-        fut->scratch_args[2 + arg_idx] = (uint64_t)input.value[arg.second];
+        fut->scratch_args[RET_OFFSET + arg_idx] = (uint64_t)input.value[arg.second];
       } else {
-        fut->scratch_args[2 + arg_idx] = arg.second;
+        fut->scratch_args[RET_OFFSET + arg_idx] = arg.second;
       }
       ++arg_idx;
     }
@@ -156,11 +186,11 @@ uint64_t distance(MutInput &input, struct FUT* fut) {
     // mapping symbolic args
     int arg_idx = 0;
     std::shared_ptr<Constraint> c = fut->constraints[i];
-    for (auto arg : fut->constraints[i]->input_args) {
+    for (auto arg : c->input_args) {
       if (arg.first) { // symbolic
-        fut->scratch_args[2 + arg_idx] = (uint64_t)input.value[arg.second];
+        fut->scratch_args[RET_OFFSET + arg_idx] = (uint64_t)input.value[arg.second];
       } else {
-        fut->scratch_args[2 + arg_idx] = arg.second;
+        fut->scratch_args[RET_OFFSET + arg_idx] = arg.second;
       }
       ++arg_idx;
     }
@@ -170,6 +200,8 @@ uint64_t distance(MutInput &input, struct FUT* fut) {
     c->fn(fut->scratch_args);
     uint64_t dis = getDistance(c->comparison, fut->scratch_args[0], fut->scratch_args[1]);
     fut->distances[i] = dis;
+    c->op1 = fut->scratch_args[0];
+    c->op2 = fut->scratch_args[1];
     if (i == 0) dis0 = dis;
     /*
        if (dis == 0 && i == 0 && !fut->opti_hit) {
@@ -381,9 +413,130 @@ uint64_t descend(MutInput &input_min, MutInput &input, uint64_t f0, Grad &grad, 
 }
 
 
+static uint64_t get_i2s_value(uint32_t comp, uint64_t v, bool rhs) {
+  switch (comp) {
+    case rgd::Equal:
+    case rgd::Ule:
+    case rgd::Uge:
+    case rgd::Sle:
+    case rgd::Sge:
+      return v;
+    case rgd::Distinct:
+    case rgd::Ugt:
+    case rgd::Sgt:
+      if (rhs) return v + 1;
+      else return v - 1;
+    case rgd::Ult:
+    case rgd::Slt:
+      if (rhs) return v - 1;
+      else return v + 1;
+    default:
+      assert(false && "Non-relational op!");
+  }
+  return v;
+}
+
+
+static uint64_t try_new_i2s_value(std::shared_ptr<Constraint> c, uint64_t value, struct FUT* fut) {
+  int i = 0;
+  for (auto const& [offset, lidx] : c->local_map) {
+    uint64_t v = ((value >> i) & 0xff);
+    fut->scratch_args[RET_OFFSET + lidx] = v;
+    i += 8;
+  }
+  int arg_idx = 0;
+  for (auto arg : c->input_args) {
+    if (!arg.first) fut->scratch_args[RET_OFFSET + arg_idx] = arg.second;
+    ++arg_idx;
+  }
+  c->fn(fut->scratch_args);
+  return getDistance(c->comparison, fut->scratch_args[0], fut->scratch_args[1]);
+}
+
+
+uint64_t try_i2s(MutInput &input_min, MutInput &temp_input, uint64_t f0, struct FUT* fut) {
+  temp_input = input_min;
+  bool updated = false;
+  for (int k = 0; k < fut->constraints.size(); k++) {
+    std::shared_ptr<Constraint> c = fut->constraints[k];
+    if (fut->distances[k] && c->i2s_feasible) {
+      // check concatenated inputs against comparison operands
+      // FIXME: add support for other input encodings
+      uint64_t input = 0, input_r, value = 0, dis = -1;
+      int i = 0, t = c->local_map.size() * 8;
+      for (auto const& [offset, lidx] : c->local_map) {
+        input |= (input_min.get(c->input_args[lidx].second) << i);
+        input_r |= (input_min.get(c->input_args[lidx].second) << (t - i - 8));
+        i += 8;
+      }
+      if (input == c->op1) {
+        value = get_i2s_value(c->comparison, c->op2, true);
+      } else if (input == c->op2) {
+        value = get_i2s_value(c->comparison, c->op1, false);
+      } else {
+        goto try_reverse;
+      }
+
+      // test the new value
+      dis = try_new_i2s_value(c, value, fut);
+      if (dis == 0) {
+#if DEBUG
+        std::cout << "i2s updated c = " << k << " t = " << t << " input = " << input
+                  << " op1 = " << c->op1 << " op2 = " << c->op2
+                  << " cmp = " << c->comparison << " value = " << value
+                  << " old-dis = " << fut->distances[k] << " new-dis = " << dis << std::endl;
+#endif
+        // successful, update the real inputs
+        i = 0;
+        for (auto const& [offset, lidx] : c->local_map) {
+          uint8_t v = ((value >> i) & 0xff);
+          temp_input.set(c->input_args[lidx].second, v);
+          i += 8;
+        }
+        updated = true;
+        continue;
+      }
+
+try_reverse:
+      // try reverse encoding
+      if (input_r == c->op1) {
+        value = get_i2s_value(c->comparison, c->op2, true);
+      } else if (input_r == c->op2) {
+        value = get_i2s_value(c->comparison, c->op1, false);
+      } else {
+        continue;
+      }
+
+      // test the new value
+      value = SWAP64(value) >> (64 - t); // reverse the value
+      dis = try_new_i2s_value(c, value, fut);
+      if (dis == 0) {
+        // successful, update the real inputs
+        i = 0;
+        for (auto const& [offset, lidx] : c->local_map) {
+          uint8_t v = ((value >> i) & 0xff);
+          // uint8_t v = ((value >> (t - i - 8)) & 0xff);
+          temp_input.set(c->input_args[lidx].second, v);
+          i += 8;
+        }
+        updated = true;
+      }
+    }
+  }
+  if (updated) {
+    uint64_t f_new = distance(temp_input, fut);
+    if (f_new < f0) {
+      // std::cout << "i2s succeeded: " << f0 << " -> " << f_new << std::endl;
+      input_min = temp_input;
+      return f_new;
+    }
+  }
+  return f0;
+}
+
 uint64_t repick_start_point(MutInput &input_min, struct FUT* fut) {
   input_min.randomize();
-  uint64_t ret = distance(input_min,fut);
+  uint64_t ret = distance(input_min, fut);
   fut->orig_distances = fut->distances;
   return ret;
 }
@@ -408,7 +561,10 @@ bool gd_entry(struct FUT* fut) {
   MutInput scratch_input(fut->inputs.size());
   //return true;
 
-  uint64_t f0 = reload_input(input, fut); 
+  uint64_t f0 = reload_input(input, fut);
+  f0 = try_i2s(input, scratch_input, f0, fut);
+  if (fut->stopped)
+    return fut->gsol;
 
   if (f0 == UINTMAX_MAX)
     return false;
@@ -436,6 +592,7 @@ bool gd_entry(struct FUT* fut) {
       //f0 = repick_start_point(input, f0, rng);
       //f0 = reload_input(input);
       f0 = repick_start_point(input, fut);
+      f0 = try_i2s(input, scratch_input, f0, fut);
       if (fut->stopped)
         break;
       grad.clear();
