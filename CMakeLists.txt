@@ -4,11 +4,10 @@ project(rgd C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -g -std=c++17 -mcx16 -march=native -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free")
-set(CMAKE_TEST_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/test) 
-#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O2 -fPIC -Wall -Wextra -std=c++11")
-  
+# set(CMAKE_LINKER_FLAGS "${CMAKE_LINKER_FLAGS} -fsanitize=address")
+set(CMAKE_TEST_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/test)
 
-find_package(LLVM 9 REQUIRED CONFIG)
+find_package(LLVM 12 REQUIRED CONFIG)
 
 if (LLVM_FOUND)
   message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
@@ -41,24 +40,24 @@ add_custom_command(
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
 add_library(gd
-	gd.cc
-	input.cc
-	grad.cc
+  gd.cc
+  input.cc
+  grad.cc
 )
 
 add_executable(rgd
   rgd.cc
   jit.cc
-	util.cc
+  util.cc
   xxhash.cc
   ${rgd_proto_srcs})
 
 target_link_libraries(rgd
   protobuf
-	tcmalloc
-	profiler
-	gd
+  tcmalloc
+  profiler
+  gd
   LLVM
   pthread
-	boost_system
-	boost_filesystem)
+  boost_system
+  boost_filesystem)

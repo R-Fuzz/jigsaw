@@ -528,8 +528,8 @@ int addFunction(const JitRequest* request,
   std::string moduleName = "rgdjit_m" + std::to_string(id);
   std::string funcName = "rgdjit_f" + std::to_string(id);
 
-  auto TheCtx = llvm::make_unique<llvm::LLVMContext>();
-  auto TheModule = llvm::make_unique<Module>(moduleName, *TheCtx);
+  auto TheCtx = std::make_unique<llvm::LLVMContext>();
+  auto TheModule = std::make_unique<Module>(moduleName, *TheCtx);
   TheModule->setDataLayout(JIT->getDataLayout());
   llvm::IRBuilder<> Builder(*TheCtx);
 
