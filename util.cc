@@ -73,7 +73,7 @@ static std::string get_name(uint32_t kind) {
   }
 }
 
-static void do_print(const JitRequest* req) {
+static void do_print(const AstNode* req) {
   std::cerr << get_name(req->kind()) << "(";
   //std::cerr << req->name() << "(";
   std::cerr << "width=" << req->bits() << ",";
@@ -102,7 +102,7 @@ static void do_print(const JitRequest* req) {
   std::cerr << ")";
 }
 
-static void verbose_do_print(int depth,const JitRequest* req) {
+static void verbose_do_print(int depth,const AstNode* req) {
   for (int i = 0; i< depth;i++)
     std::cerr << "\t";
   std::cerr << req->name() << "(";
@@ -130,7 +130,7 @@ static void verbose_do_print(int depth,const JitRequest* req) {
   std::cerr << ")";
 }
 
-void printExpression(const JitRequest* req) {
+void printExpression(const AstNode* req) {
   do_print(req);
   std::cerr << std::endl;
 }

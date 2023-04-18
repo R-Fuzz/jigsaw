@@ -30,30 +30,30 @@ using namespace rgd;
 std::unique_ptr<GradJit> JIT;
 
 static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
-    const JitRequest* request,
+    const AstNode* node,
     std::map<uint32_t, uint32_t> &local_map, llvm::Value* arg,
     std::unordered_map<uint32_t, llvm::Value*> &value_cache,
-    std::unordered_map<uint32_t, JitRequest*> &expr_cache) {
+    std::unordered_map<uint32_t, AstNode*> &expr_cache) {
   llvm::Value* ret = nullptr;
   //std::cout << "code gen and nargs is " << nargs << std::endl;
-  auto r1 = expr_cache.find(request->label());
+  auto r1 = expr_cache.find(node->label());
 
-  if (request->label() != 0 &&
+  if (node->label() != 0 &&
       r1 != expr_cache.end()) {
-    request = expr_cache[request->label()];
+    node = expr_cache[node->label()];
   }
 
-  auto itr = value_cache.find(request->label());
-  if (request->label() != 0
+  auto itr = value_cache.find(node->label());
+  if (node->label() != 0
       && itr != value_cache.end()) {
-    //std::cout << " value cache hit and label is " << request->label() << std::endl;
+    //std::cout << " value cache hit and label is " << node->label() << std::endl;
     return itr->second;
   }
 
-  switch (request->kind()) {
+  switch (node->kind()) {
     case rgd::Bool: {
       // getTrue is actually 1 bit integer 1
-      if (request->boolvalue())
+      if (node->boolvalue())
         ret = llvm::ConstantInt::getTrue(Builder.getContext());
       else
         ret = llvm::ConstantInt::getFalse(Builder.getContext());
@@ -61,19 +61,19 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
     }
     case rgd::Constant: {
       // The constant is now loading from arguments
-      uint32_t start = request->index();
-      uint32_t length = request->bits() / 8;
+      uint32_t start = node->index();
+      uint32_t length = node->bits() / 8;
 
       llvm::Value* idx[1];
       idx[0] = llvm::ConstantInt::get(Builder.getInt32Ty(), start + RET_OFFSET);
       ret = Builder.CreateLoad(Builder.CreateGEP(arg, idx));
       ret = Builder.CreateTrunc(ret,
-          llvm::Type::getIntNTy(Builder.getContext(), request->bits()));
+          llvm::Type::getIntNTy(Builder.getContext(), node->bits()));
       break;
     }
     case rgd::Read: {
-      uint32_t start = local_map[request->index()];
-      size_t length = request->bits() / 8;
+      uint32_t start = local_map[node->index()];
+      size_t length = node->bits() / 8;
       //std::cout << "read index " << start << " length " << length << std::endl;
       llvm::Value* idx[1];
       idx[0] = llvm::ConstantInt::get(Builder.getInt32Ty(), start + RET_OFFSET);
@@ -85,12 +85,12 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
         ret = Builder.CreateAdd(ret, tmp);
       }
       ret = Builder.CreateTrunc(ret,
-          llvm::Type::getIntNTy(Builder.getContext(), request->bits()));
+          llvm::Type::getIntNTy(Builder.getContext(), node->bits()));
       break;
     }
     case rgd::Concat: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       uint32_t bits = rc1->bits() + rc2->bits(); 
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
@@ -105,65 +105,65 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
 #if DEBUG
       //std::cerr << "Extract expression" << std::endl;
 #endif
-      const JitRequest* rc = &request->children(0);
+      const AstNode* rc = &node->children(0);
       llvm::Value* c = codegen(Builder, rc, local_map, arg, value_cache, expr_cache);
       ret = Builder.CreateTrunc(
-          Builder.CreateLShr(c, request->index()),
-          llvm::Type::getIntNTy(Builder.getContext(), request->bits()));
+          Builder.CreateLShr(c, node->index()),
+          llvm::Type::getIntNTy(Builder.getContext(), node->bits()));
       break;
     }
     case rgd::ZExt: {
 #if DEBUG
-      // std::cerr << "ZExt the bits is " << request->bits() << std::endl;
+      // std::cerr << "ZExt the bits is " << node->bits() << std::endl;
 #endif
-      const JitRequest* rc = &request->children(0);
+      const AstNode* rc = &node->children(0);
       llvm::Value* c = codegen(Builder, rc, local_map, arg, value_cache, expr_cache);
       //FIXME: we may face ZEXT to boolean expr
       ret = Builder.CreateZExtOrTrunc(c,
-          llvm::Type::getIntNTy(Builder.getContext(), request->bits()));
+          llvm::Type::getIntNTy(Builder.getContext(), node->bits()));
       break;
     }
     case rgd::SExt: {
 #if DEBUG
-      // std::cerr << "SExt the bits is " << request->bits() << std::endl;
+      // std::cerr << "SExt the bits is " << node->bits() << std::endl;
 #endif
-      const JitRequest* rc = &request->children(0);
+      const AstNode* rc = &node->children(0);
       llvm::Value* c = codegen(Builder, rc,local_map, arg, value_cache, expr_cache);
       ret = Builder.CreateSExt(c,
-          llvm::Type::getIntNTy(Builder.getContext(), request->bits()));
+          llvm::Type::getIntNTy(Builder.getContext(), node->bits()));
       break;
     }
     case rgd::Add: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       ret = Builder.CreateAdd(c1, c2);
       break;
     }
     case rgd::Sub: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       ret = Builder.CreateSub(c1, c2);
       break;
     }
     case rgd::Mul: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       ret = Builder.CreateMul(c1, c2);
       break;
     }
     case rgd::UDiv: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
-      llvm::Value* VA0 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 0);
-      llvm::Value* VA1 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 1);
+      llvm::Value* VA0 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), node->bits()), 0);
+      llvm::Value* VA1 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), node->bits()), 1);
       // FIXME: this is a hack to avoid division by zero, but should use a better way
       // FIXME: should record the divisor to avoid gradient vanish
       llvm::Value* cond = Builder.CreateICmpEQ(c2, VA0);
@@ -172,12 +172,12 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::SDiv: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
-      llvm::Value* VA0 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 0);
-      llvm::Value* VA1 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 1);
+      llvm::Value* VA0 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), node->bits()), 0);
+      llvm::Value* VA1 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), node->bits()), 1);
       // FIXME: this is a hack to avoid division by zero, but should use a better way
       // FIXME: should record the divisor to avoid gradient vanish
       llvm::Value* cond = Builder.CreateICmpEQ(c2, VA0);
@@ -186,12 +186,12 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::URem: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
-      llvm::Value* VA0 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 0);
-      llvm::Value* VA1 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 1);
+      llvm::Value* VA0 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), node->bits()), 0);
+      llvm::Value* VA1 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), node->bits()), 1);
       // FIXME: this is a hack to avoid division by zero, but should use a better way
       // FIXME: should record the divisor to avoid gradient vanish
       llvm::Value* cond = Builder.CreateICmpEQ(c2, VA0);
@@ -200,12 +200,12 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::SRem: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
-      llvm::Value* VA0 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 0);
-      llvm::Value* VA1 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), request->bits()), 1);
+      llvm::Value* VA0 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), node->bits()), 0);
+      llvm::Value* VA1 = llvm::ConstantInt::get(llvm::Type::getIntNTy(Builder.getContext(), node->bits()), 1);
       // FIXME: this is a hack to avoid division by zero, but should use a better way
       // FIXME: should record the divisor to avoid gradient vanish
       llvm::Value* cond = Builder.CreateICmpEQ(c2, VA0);
@@ -214,60 +214,60 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::Neg: {
-      const JitRequest* rc = &request->children(0);
+      const AstNode* rc = &node->children(0);
       llvm::Value* c = codegen(Builder, rc, local_map, arg, value_cache, expr_cache);
       ret = Builder.CreateNeg(c);
       break;
     }
     case rgd::Not: {
-      const JitRequest* rc = &request->children(0);
+      const AstNode* rc = &node->children(0);
       llvm::Value* c = codegen(Builder, rc, local_map, arg, value_cache, expr_cache);
       ret = Builder.CreateNot(c);
       break;
     }
     case rgd::And: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       ret = Builder.CreateAnd(c1, c2);
       break;
     }
     case rgd::Or: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       ret = Builder.CreateOr(c1, c2);
       break;
     }
     case rgd::Xor: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       ret = Builder.CreateXor(c1, c2);
       break;
     }
     case rgd::Shl: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       ret = Builder.CreateShl(c1, c2);
       break;
     }
     case rgd::LShr: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       ret = Builder.CreateLShr(c1, c2);
       break;
     }
     case rgd::AShr: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       ret = Builder.CreateAShr(c1, c2);
@@ -275,8 +275,8 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
     }
     // all the following ICmp expressions should be top level
     case rgd::Equal: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       // extend to 64-bit to avoid overflow
@@ -295,8 +295,8 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::Distinct: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       // extend to 64-bit to avoid overflow
@@ -315,8 +315,8 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::Ult: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       // extend to 64-bit to avoid overflow
@@ -335,8 +335,8 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::Ule: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       // extend to 64-bit to avoid overflow
@@ -355,8 +355,8 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::Ugt: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       // extend to 64-bit to avoid overflow
@@ -375,8 +375,8 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::Uge: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       // extend to 64-bit to avoid overflow
@@ -395,8 +395,8 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::Slt: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       // extend to 64-bit to avoid overflow
@@ -415,8 +415,8 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::Sle: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       // extend to 64-bit to avoid overflow
@@ -435,8 +435,8 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::Sgt: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       // extend to 64-bit to avoid overflow
@@ -455,8 +455,8 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       break;
     }
     case rgd::Sge: {
-      const JitRequest* rc1 = &request->children(0);
-      const JitRequest* rc2 = &request->children(1);
+      const AstNode* rc1 = &node->children(0);
+      const AstNode* rc2 = &node->children(1);
       llvm::Value* c1 = codegen(Builder, rc1, local_map, arg, value_cache, expr_cache);
       llvm::Value* c2 = codegen(Builder, rc2, local_map, arg, value_cache, expr_cache);
       // extend to 64-bit to avoid overflow
@@ -493,9 +493,9 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
       std::cerr << "ITE expr codegen" << std::endl;
 #endif
 #if 0
-      const JitRequest* rcond = &request->children(0);
-      const JitRequest* rtv = &request->children(1);
-      const JitRequest* rfv = &request->children(2);
+      const AstNode* rcond = &node->children(0);
+      const AstNode* rtv = &node->children(1);
+      const AstNode* rfv = &node->children(2);
       llvm::Value* cond = codegen(rcond, local_map, arg, value_cache);
       llvm::Value* tv = codegen(rtv, local_map, arg, value_cache);
       llvm::Value* fv = codegen(rfv, local_map, arg, value_cache);
@@ -505,24 +505,24 @@ static llvm::Value* codegen(llvm::IRBuilder<> &Builder,
     }
     default:
       //std::cerr << "WARNING: unhandled expr: ";
-      printExpression(request);
+      printExpression(node);
       break;
   }
 
   // add to cache
-  if (ret && request->label() != 0) {
-    value_cache.insert({request->label(), ret});
+  if (ret && node->label() != 0) {
+    value_cache.insert({node->label(), ret});
   }
 
   return ret; 
 }
 
-int addFunction(const JitRequest* request,
+int addFunction(const AstNode* node,
     std::map<uint32_t,uint32_t> &local_map,
     uint64_t id,
-    std::unordered_map<uint32_t,JitRequest*> &expr_cache) {
+    std::unordered_map<uint32_t,AstNode*> &expr_cache) {
 
-  assert(isRelational(request->kind()) && "non-relational expr");
+  assert(isRelational(node->kind()) && "non-relational expr");
 
   // Open a new module.
   std::string moduleName = "rgdjit_m" + std::to_string(id);
@@ -546,7 +546,7 @@ int addFunction(const JitRequest* request,
   auto args = fooFunc->arg_begin();
   llvm::Value* var = &(*args);
   std::unordered_map<uint32_t, llvm::Value*> value_cache;
-  auto *body = codegen(Builder, request, local_map, var, value_cache, expr_cache);
+  auto *body = codegen(Builder, node, local_map, var, value_cache, expr_cache);
   assert(body == nullptr && "non-comparison expr");
   Builder.CreateRet(body);
 

@@ -73,7 +73,7 @@ bool gd_entry(struct FUT* dut);
 
 namespace rgd {
 
-bool recursive_equal(const JitRequest& lhs, const JitRequest& rhs) {
+bool recursive_equal(const AstNode& lhs, const AstNode& rhs) {
   if ((lhs.kind() >= rgd::Ult && lhs.kind() <= rgd::Uge) && 
       (rhs.kind() >= rgd::Ult && rhs.kind() <= rgd::Uge)) {
     const int children_size = lhs.children_size();
@@ -116,20 +116,20 @@ bool recursive_equal(const JitRequest& lhs, const JitRequest& rhs) {
   return true;
 }
 
-bool isEqual(const JitRequest& lhs, const JitRequest& rhs) {
+bool isEqual(const AstNode& lhs, const AstNode& rhs) {
   return recursive_equal(lhs, rhs);
 }
 
 struct myKV {
-  std::shared_ptr<JitRequest> req;
+  std::shared_ptr<AstNode> req;
   test_fn_type fn;
-  myKV(std::shared_ptr<JitRequest> areq, test_fn_type f) : req(areq), fn(f) {}
+  myKV(std::shared_ptr<AstNode> areq, test_fn_type f) : req(areq), fn(f) {}
 };
 
 struct nestKV {
   uint32_t label;
-  std::shared_ptr<JitRequest> req;
-  nestKV(uint32_t l, std::shared_ptr<JitRequest> areq) : label(l), req(areq) {}
+  std::shared_ptr<AstNode> req;
+  nestKV(uint32_t l, std::shared_ptr<AstNode> areq) : label(l), req(areq) {}
 };
 
 struct consKV {
@@ -140,7 +140,7 @@ struct consKV {
 
 struct myHash {
   using eType = struct myKV*;
-  using kType = std::shared_ptr<JitRequest>;
+  using kType = std::shared_ptr<AstNode>;
   eType empty() {return nullptr;}
   kType getKey(eType v) {return v->req;}
   int hash(kType v) {return v->hash();} //hash64_2(v);}
@@ -207,14 +207,14 @@ struct consHash {
   bool cas(eType* p, eType o, eType n) {return atomic_compare_and_swap(p, o, n);}
 };
 
-struct RequestHash {
-  std::size_t operator()(const JitRequest& req) const {
+struct AstHash {
+  std::size_t operator()(const AstNode& req) const {
     return req.hash();
   }
 };
 
-struct RequestEqual {
-  bool recursive_equal(const JitRequest& lhs, const JitRequest& rhs) const {
+struct AstEqual {
+  bool recursive_equal(const AstNode& lhs, const AstNode& rhs) const {
     if (lhs.hash() != rhs.hash()) return false;
     if (lhs.kind() != rhs.kind()) return false;
     if (lhs.bits() != rhs.bits()) return false;
@@ -227,7 +227,7 @@ struct RequestEqual {
     return true;
   }
 
-  bool operator()(const JitRequest& lhs, const JitRequest& rhs) const {
+  bool operator()(const AstNode& lhs, const AstNode& rhs) const {
     return recursive_equal(lhs, rhs);
   }
 };
@@ -301,43 +301,43 @@ RGDServiceImpl::RGDServiceImpl() {
 }
 
 
-static void analyzeExpr(JitRequest* request, bool &hasIte, bool &abWidth, int depth, bool &nonRootLNot, bool &div, bool &hasZExt, bool &zext_bool, std::unordered_map<uint32_t, JitRequest*> &expr_cache) {
-  auto r1 = expr_cache.find(request->label());
+static void analyzeExpr(AstNode* node, bool &hasIte, bool &abWidth, int depth, bool &nonRootLNot, bool &div, bool &hasZExt, bool &zext_bool, std::unordered_map<uint32_t, AstNode*> &expr_cache) {
+  auto r1 = expr_cache.find(node->label());
 
-  if (request->label() != 0 && r1 == expr_cache.end())
-    expr_cache.insert({request->label(), request});
-  else if (request->label() != 0 &&
+  if (node->label() != 0 && r1 == expr_cache.end())
+    expr_cache.insert({node->label(), node});
+  else if (node->label() != 0 &&
       r1 != expr_cache.end()) {
-    request = expr_cache[request->label()];
+    node = expr_cache[node->label()];
   }
 
-  if (request->bits() > 64) abWidth = true;
+  if (node->bits() > 64) abWidth = true;
 
-  if (request->kind() == rgd::Ite) {
+  if (node->kind() == rgd::Ite) {
     hasIte = true;
-  } else if (request->kind() == rgd::ZExt) {
+  } else if (node->kind() == rgd::ZExt) {
     hasZExt = true;
-  } /*else if (request->kind() == rgd::UDiv
-      || request->kind() == rgd::SDiv
-      || request->kind() == rgd::SRem
-      || request->kind() == rgd::URem) {
+  } /*else if (node->kind() == rgd::UDiv
+      || node->kind() == rgd::SDiv
+      || node->kind() == rgd::SRem
+      || node->kind() == rgd::URem) {
       div = true;
-      } */ else if (isRelational(request->kind())) {
+      } */ else if (isRelational(node->kind())) {
         if (hasZExt)
           zext_bool = true;
-      } else if (request->kind() == rgd::LNot) {
+      } else if (node->kind() == rgd::LNot) {
         if (depth != 0)
           nonRootLNot = true;
       }
 
-for (int i = 0; i < request->children_size(); i++)
-  analyzeExpr(request->mutable_children(i), hasIte, abWidth, ++depth, nonRootLNot, div, hasZExt, zext_bool, expr_cache);
+for (int i = 0; i < node->children_size(); i++)
+  analyzeExpr(node->mutable_children(i), hasIte, abWidth, ++depth, nonRootLNot, div, hasZExt, zext_bool, expr_cache);
 }
 
 // map the inputs to a constraint to the input array so as to maximize
 // the reusability of the constraint (e.g., a > b, c > d can use the same
 // JIT'ed function)
-static void mapArgs(JitRequest* req, 
+static void mapArgs(AstNode* req, 
     std::shared_ptr<Constraint> &constraint,
     std::unordered_set<uint32_t> &visited) {
 
@@ -404,8 +404,8 @@ static void mapArgs(JitRequest* req,
   }
 }
 
-static const JitRequest* transform(const JitRequest* request, int &constraint) {
-  switch (request->kind()) {
+static const AstNode* transform(const AstNode* node, int &constraint) {
+  switch (node->kind()) {
     case rgd::Equal:
       constraint = 0;
       break;
@@ -437,7 +437,7 @@ static const JitRequest* transform(const JitRequest* request, int &constraint) {
       constraint = 5; 
       break;
     case rgd::LNot: {
-      switch (request->children(0).kind()) {
+      switch (node->children(0).kind()) {
         case rgd::Equal:
           constraint = 1;
           break;
@@ -469,20 +469,20 @@ static const JitRequest* transform(const JitRequest* request, int &constraint) {
           constraint = 2;
           break;
         default:
-          //std::cerr << "unhandled child kind " << request->children(0).kind() << std::endl; 
+          //std::cerr << "unhandled child kind " << node->children(0).kind() << std::endl; 
           return nullptr;
       }
-      return &request->children(0);
+      return &node->children(0);
     }
     default:
       // all subexpr must be a comparison (conditional branch)
-      //std::cerr << "unhandled kind " << request->kind() << std::endl; 
+      //std::cerr << "unhandled kind " << node->kind() << std::endl; 
       return nullptr;
   }
-  return request;
+  return node;
 }
 
-static void dumpList(std::deque<std::deque<const JitRequest*>> list) {
+static void dumpList(std::deque<std::deque<const AstNode*>> list) {
   std::cout << "dump list" << std::endl;
   for(auto l : list) {
     for(auto i : l)
@@ -491,15 +491,15 @@ static void dumpList(std::deque<std::deque<const JitRequest*>> list) {
   }
 }
 
-static void toDNF(JitRequest* req, std::deque<std::deque<JitRequest*>> &res) {
+static void toDNF(AstNode* req, std::deque<std::deque<AstNode*>> &res) {
   if (req->kind() == rgd::LAnd) {
-    std::deque<std::deque<JitRequest*>> p1;
-    std::deque<std::deque<JitRequest*>> p2;
+    std::deque<std::deque<AstNode*>> p1;
+    std::deque<std::deque<AstNode*>> p2;
     toDNF(req->mutable_children(0), p1);
     toDNF(req->mutable_children(1), p2);
     for (auto &sub1 : p1) {
       for (auto &sub2: p2) {
-        std::deque<JitRequest*> cur;
+        std::deque<AstNode*> cur;
         cur.insert(cur.end(), sub1.begin(), sub1.end());
         cur.insert(cur.end(), sub2.begin(), sub2.end());
         res.push_back(cur);
@@ -511,13 +511,13 @@ static void toDNF(JitRequest* req, std::deque<std::deque<JitRequest*>> &res) {
     toDNF(req->mutable_children(0), res);
     toDNF(req->mutable_children(1), res);
   } else {
-    std::deque<JitRequest*> cur;
+    std::deque<AstNode*> cur;
     cur.push_back(req);
     res.push_back(cur);
   }
 }
 
-static bool rejectTask(std::deque<JitRequest*> &list) {
+static bool rejectTask(std::deque<AstNode*> &list) {
   bool hasIte = false;
   bool abWidth = false;
   int depth = 0;
@@ -528,7 +528,7 @@ static bool rejectTask(std::deque<JitRequest*> &list) {
 
 
   // collect input and const arguments
-  std::unordered_map<uint32_t, JitRequest*> expr_cache;
+  std::unordered_map<uint32_t, AstNode*> expr_cache;
   for (auto expr : list) {
     analyzeExpr(expr, hasIte, abWidth, depth, nonRootLNot,div,hasZExt, zext_bool, expr_cache);
     if (hasIte || abWidth || nonRootLNot || div || zext_bool) {
@@ -539,8 +539,8 @@ static bool rejectTask(std::deque<JitRequest*> &list) {
   return false;
 }
 
-static JitRequest* negate(JitRequest* request) {
-  JitRequest* c = request;
+static AstNode* negate(AstNode* node) {
+  AstNode* c = node;
   switch (c->kind()) {
     case rgd::Equal:
       c->set_kind(rgd::Distinct);
@@ -579,19 +579,19 @@ static JitRequest* negate(JitRequest* request) {
 }
 
 
-static JitRequest* simplify(JitRequest* request) {
+static AstNode* simplify(AstNode* node) {
   // strip LNot
-  if (request->kind() == rgd::LNot)
-    request = negate(request->mutable_children(0));
-  if (!request)
+  if (node->kind() == rgd::LNot)
+    node = negate(node->mutable_children(0));
+  if (!node)
     return nullptr;
 
   // strip unnecessary comparison
   // distinct(zext(32, equal(zext(64, read(0)), constant(13))), constant(0))
   // => equal(zext(64, read(0)), constant(13))
-  if (request->kind() == rgd::Distinct || request->kind() == rgd::Equal) {
-    auto c0 = request->mutable_children(0);
-    auto c1 = request->mutable_children(1);
+  if (node->kind() == rgd::Distinct || node->kind() == rgd::Equal) {
+    auto c0 = node->mutable_children(0);
+    auto c1 = node->mutable_children(1);
     if (c1->kind() == rgd::ZExt && c0->kind() == rgd::Constant) {
       // swap
       auto tmp = c1;
@@ -602,33 +602,33 @@ static JitRequest* simplify(JitRequest* request) {
       auto c00 = c0->mutable_children(0);
       if (isRelational(c00->kind())) {
         llvm::StringRef ref(c1->value());
-        llvm::APInt value(request->bits(), ref, 10);
+        llvm::APInt value(node->bits(), ref, 10);
         uint64_t cv = value.getZExtValue();
-        if (request->kind() == rgd::Distinct) {
+        if (node->kind() == rgd::Distinct) {
           if (cv == 0) {
             // != 0 => true => keep the same
-            request = c00;
+            node = c00;
           } else {
             // != 1 => false => negate
-            request = negate(c00);
+            node = negate(c00);
           }
         } else { // rgd::Equal
           if (cv == 0) {
             // == 0 => false => negate
-            request = negate(c00);
+            node = negate(c00);
           } else {
             // == 1 => true => keep the same
-            request = c00;
+            node = c00;
           }
         }
       }
     }
   }
   // strip LNot
-  if (request->kind() == rgd::LNot)
-    request = negate(request->mutable_children(0));
+  if (node->kind() == rgd::LNot)
+    node = negate(node->mutable_children(0));
 
-  return request;
+  return node;
 }
 
 struct temp_hash {
@@ -645,8 +645,8 @@ struct temp_equal {
 };
 std::unordered_map<std::tuple<uint32_t,uint32_t,uint32_t>, std::shared_ptr<Constraint>, temp_hash,temp_equal> temp(1000000);
 
-static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
-    std::unordered_map<JitRequest, uint64_t, RequestHash, RequestEqual> &funcCache) {
+static FUT* constructTask(std::deque<AstNode*> &list, int threadId,
+    std::unordered_map<AstNode, uint64_t, AstHash, AstEqual> &funcCache) {
   struct FUT *fut = new FUT();
   //GradJit *JIT = new GradJit();
   fut->gsol = false;
@@ -660,24 +660,24 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
   uint64_t start = getTimeStamp();
   // collect input and const arguments
   for (auto expr : list) {
-    std::unordered_map<uint32_t, JitRequest*> expr_cache;
+    std::unordered_map<uint32_t, AstNode*> expr_cache;
     if (expr->kind() == rgd::Constant) continue;
-    JitRequest* adjusted_request = nullptr;
-    adjusted_request = simplify(expr);
-    if (!adjusted_request) {
+    AstNode* adjusted_node = nullptr;
+    adjusted_node = simplify(expr);
+    if (!adjusted_node) {
       delete fut;
       return nullptr;
     }
 
-    if(!isRelational(adjusted_request->kind())) {
+    if(!isRelational(adjusted_node->kind())) {
       printf("no relational!\n");
       return nullptr;
     }
 
-    //printf("adjust session id %d, label %d, kind %d\n", adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind());
+    //printf("adjust session id %d, label %d, kind %d\n", adjusted_node->sessionid(), adjusted_node->label(), adjusted_node->kind());
 #if CONSTRAINT_CACHE
     uint64_t time2 = getTimeStamp();
-    struct consKV *res1 = consCache.find({adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind()});
+    struct consKV *res1 = consCache.find({adjusted_node->sessionid(), adjusted_node->label(), adjusted_node->kind()});
     parsing_total3 += getTimeStamp() - time2;
     if (res1) {
       //printf("local hit %d\n", ++localhit);
@@ -692,16 +692,16 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
     std::unordered_set<uint32_t> visited;
     std::shared_ptr<Constraint> constraint = std::make_shared<Constraint>();
     constraint->const_num = 0;
-    constraint->comparison = adjusted_request->kind();
-    mapArgs(adjusted_request, constraint, visited);
-    std::shared_ptr<JitRequest> copied_req = std::make_shared<JitRequest>();
-    copied_req->CopyFrom(*adjusted_request);
+    constraint->comparison = adjusted_node->kind();
+    mapArgs(adjusted_node, constraint, visited);
+    std::shared_ptr<AstNode> copied_req = std::make_shared<AstNode>();
+    copied_req->CopyFrom(*adjusted_node);
 
     struct myKV *res = fCache.find(copied_req);
     if (res == nullptr) {
       miss++;
       uint64_t id = ++uuid;
-      addFunction(adjusted_request, constraint->local_map, id, expr_cache);
+      addFunction(adjusted_node, constraint->local_map, id, expr_cache);
       auto fn = performJit(id);
       auto kv = new struct myKV(copied_req, fn);
       if (!fCache.insert(kv))
@@ -712,13 +712,13 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
       constraint->fn = res->fn;
     }
 
-    assert(isRelational(adjusted_request->kind()) && "non-relational expr");
+    assert(isRelational(adjusted_node->kind()) && "non-relational expr");
     fut->constraints.push_back(constraint);
 #if CONSTRAINT_CACHE
-    auto kv = new struct consKV({adjusted_request->sessionid(), adjusted_request->label(), adjusted_request->kind()}, constraint);
+    auto kv = new struct consKV({adjusted_node->sessionid(), adjusted_node->label(), adjusted_node->kind()}, constraint);
     if (!consCache.insert(kv))
       delete kv;
-    //temp.insert({adjusted_request->sessionid()*1000000+adjusted_request->label()*100+adjusted_request->kind(), constraint});
+    //temp.insert({adjusted_node->sessionid()*1000000+adjusted_node->label()*100+adjusted_node->kind(), constraint});
 #endif
   }
 
@@ -730,21 +730,21 @@ static FUT* constructTask(std::deque<JitRequest*> &list, int threadId,
   //return nullptr;
 }
 
-static bool checkRequest(std::shared_ptr<JitCmdv2> cmd) {
+static bool checkAst(std::shared_ptr<JitCmdv2> cmd) {
   //per reset/solve pairs
-  std::deque<std::deque<JitRequest*>> ReqList;
-  std::deque<std::deque<JitRequest*>> res;
-  std::deque<std::deque<JitRequest*>> single;
+  std::deque<std::deque<AstNode*>> ReqList;
+  std::deque<std::deque<AstNode*>> res;
+  std::deque<std::deque<AstNode*>> single;
 
   for (int i = 0; i < cmd->expr_size(); i++) {
     single.clear();
     res.clear();
-    JitRequest *expr = cmd->mutable_expr(i);
+    AstNode *expr = cmd->mutable_expr(i);
     //std::cout << "in parserequst and expr is " << std::endl;
     toDNF(expr, single);
     for(int i=0;i<ReqList.size();i++) {
       for(int j=0;j<single.size();j++) {
-        std::deque<JitRequest*> cur;
+        std::deque<AstNode*> cur;
         for(auto x : ReqList[i]) cur.push_back(x);
         for(auto y : single[j]) cur.push_back(y);
         res.push_back(cur);
@@ -752,7 +752,7 @@ static bool checkRequest(std::shared_ptr<JitCmdv2> cmd) {
     }
     if (ReqList.size()==0) {
       for(int j=0;j<single.size();j++) {
-        std::deque<JitRequest*> cur;
+        std::deque<AstNode*> cur;
         for(auto y : single[j]) cur.push_back(y);
         res.push_back(cur);
       }
@@ -769,23 +769,23 @@ static bool checkRequest(std::shared_ptr<JitCmdv2> cmd) {
 }
 
 
-static void parseRequest(bool opti, std::shared_ptr<JitCmdv2> cmd, int threadId, std::deque<FUT*> &tasks,std::unordered_map<JitRequest, uint64_t, RequestHash, RequestEqual> &funcCache) {
+static void parseAst(bool opti, std::shared_ptr<JitCmdv2> cmd, int threadId, std::deque<FUT*> &tasks,std::unordered_map<AstNode, uint64_t, AstHash, AstEqual> &funcCache) {
   uint64_t start = getTimeStamp();
   //per reset/solve pairs
-  std::deque<std::deque<JitRequest*>> ReqList;
-  std::deque<std::deque<JitRequest*>> res;
-  std::deque<std::deque<JitRequest*>> single;
+  std::deque<std::deque<AstNode*>> ReqList;
+  std::deque<std::deque<AstNode*>> res;
+  std::deque<std::deque<AstNode*>> single;
 
   int n_expr = opti?1:cmd->expr_size();
   for (int i = 0; i < n_expr; i++) {
     single.clear();
     res.clear();
-    JitRequest *expr = cmd->mutable_expr(i);
+    AstNode *expr = cmd->mutable_expr(i);
     //std::cout << "in parserequst and expr is " << std::endl;
     toDNF(expr, single);
     for(int i=0;i<ReqList.size();i++) {
       for(int j=0;j<single.size();j++) {
-        std::deque<JitRequest*> cur;
+        std::deque<AstNode*> cur;
         for(auto x : ReqList[i]) cur.push_back(x);
         for(auto y : single[j]) cur.push_back(y);
         res.push_back(cur);
@@ -793,7 +793,7 @@ static void parseRequest(bool opti, std::shared_ptr<JitCmdv2> cmd, int threadId,
     }
     if (ReqList.size()==0) {
       for(int j=0;j<single.size();j++) {
-        std::deque<JitRequest*> cur;
+        std::deque<AstNode*> cur;
         for(auto y : single[j]) cur.push_back(y);
         res.push_back(cur);
       }
@@ -822,7 +822,7 @@ static void parseRequest(bool opti, std::shared_ptr<JitCmdv2> cmd, int threadId,
   }
 }
 
-static bool isExp(const JitRequest* req, std::unordered_set<uint32_t> &visited) {
+static bool isExp(const AstNode* req, std::unordered_set<uint32_t> &visited) {
   uint32_t kind = req->kind();
   if (kind == rgd::Shl && 
       req->children(0).kind() == rgd::Constant) {
@@ -845,7 +845,7 @@ static bool screenCmd(std::shared_ptr<JitCmdv2> cmd) {
   //deprecating reset and solve
   assert(cmd->cmd()==2);
   uint64_t start = getTimeStamp();
-  bool ret = checkRequest(cmd);
+  bool ret = checkAst(cmd);
   uint64_t parsing = getTimeStamp() - start;
   parsing_total += parsing;
   return ret;
@@ -855,7 +855,7 @@ static bool screenCmd(std::shared_ptr<JitCmdv2> cmd) {
 static void solveMemcmp(std::shared_ptr<JitCmdv2> cmd,
     std::unordered_map<uint32_t,uint8_t> &rgd_solution) {
   if (cmd->expr(0).children_size() == 1) {
-    JitRequest c = cmd->expr(0).children(0);
+    AstNode c = cmd->expr(0).children(0);
     uint32_t index = c.index();
     std::string v = cmd->expr(0).value();
     std::cout << "v is " << v << " and bits is " << c.bits() << std::endl;
@@ -890,7 +890,7 @@ static bool checkContra(std::shared_ptr<JitCmdv2> cmd) {
 }
 
 static int sendLocalCmd(bool opti, std::shared_ptr<JitCmdv2> cmd, int i,
-    std::unordered_map<JitRequest, uint64_t, RequestHash, RequestEqual> &funcCache, 
+    std::unordered_map<AstNode, uint64_t, AstHash, AstEqual> &funcCache, 
     std::unordered_map<uint32_t,uint8_t> *rgd_solution, 
     std::unordered_map<uint32_t,uint8_t> *opti_solution, 
     std::unordered_map<uint32_t,uint8_t> *hint_solution, 
@@ -902,7 +902,7 @@ static int sendLocalCmd(bool opti, std::shared_ptr<JitCmdv2> cmd, int i,
   std::deque<FUT*> tasks;
   if (checkContra(cmd)) return -1;
   try {
-    parseRequest(opti, cmd, i, tasks,funcCache);
+    parseAst(opti, cmd, i, tasks,funcCache);
     uint64_t parsing = getTimeStamp() - start;
     parsing_total += parsing;
 
@@ -972,13 +972,13 @@ int gGenerate = 0;
 //ctpl::thread_pool* zpool;
 std::vector<std::future<bool>> gresults;
 
-std::vector<std::unordered_map<JitRequest, uint64_t, RequestHash, RequestEqual>> Expr2FuncList(64);
+std::vector<std::unordered_map<AstNode, uint64_t, AstHash, AstEqual>> Expr2FuncList(64);
 std::unordered_map<std::tuple<uint64_t,uint64_t,bool>, uint32_t, context_hash> BranchFilter;
 std::vector<std::array<uint32_t,14>> IterHisList(64);
 std::vector<std::array<uint32_t,14>> SucIterHisList(64);
 std::vector<std::array<uint32_t,14>> ToIterHisList(64);
 std::vector<std::shared_ptr<JitCmdv2>> allCmds;
-std::unordered_map<uint32_t,std::shared_ptr<JitRequest>> nestedCache(10000);
+std::unordered_map<uint32_t,std::shared_ptr<AstNode>> nestedCache(10000);
 
 struct thread_data {
   int thread_id;
@@ -1000,7 +1000,7 @@ void* rgdTask(void *threadarg) {
     cmdDone->set_cmd(2);
     cmdDone->set_file_name(cmd->file_name());
     for(int i = 0 ;i < cmd->expr_size(); i++) {
-      JitRequest* targetReq = cmdDone->add_expr();
+      AstNode* targetReq = cmdDone->add_expr();
       if (cmd->expr(i).direction() == 0) {
         targetReq->set_kind(rgd::LNot);
         targetReq->set_name("lnot");
@@ -1020,7 +1020,7 @@ void* rgdTask(void *threadarg) {
     }
     std::shared_ptr<JitCmdv2> cmdDoneOpt = std::make_shared<JitCmdv2>();
     cmdDoneOpt->set_cmd(2);
-    JitRequest* targetReq = cmdDoneOpt->add_expr();
+    AstNode* targetReq = cmdDoneOpt->add_expr();
     targetReq->CopyFrom(cmdDone->expr(0));
 #endif
 
@@ -1188,10 +1188,10 @@ void ReplayLocal(char** argv, int num_of_threads) {
       std::shared_ptr<JitCmdv2> cmd = std::make_shared<JitCmdv2>();
       ret = readDelimitedFrom(rawInput,cmd.get());
       if (ret) {
-        //caching the request
+        //caching the node
         allcount++;
         for (int i = 0 ; i< cmd->expr_string_size();i++) {
-          JitRequest* req = cmd->add_expr();
+          AstNode* req = cmd->add_expr();
           CodedInputStream s((uint8_t*)cmd->expr_string(i).c_str(), cmd->expr_string(i).size()); 
           s.SetRecursionLimit(100);
           //req->ParseFromString(cmd->expr_string(i));
@@ -1199,7 +1199,7 @@ void ReplayLocal(char** argv, int num_of_threads) {
         }
         for (int i = 0 ; i< cmd->expr_size();i++) {
           if (cmd->expr(i).full() == 1) {
-            std::shared_ptr<JitRequest> cachedReq = std::make_shared<JitRequest>();
+            std::shared_ptr<AstNode> cachedReq = std::make_shared<AstNode>();
             cachedReq->CopyFrom(cmd->expr(i));
             //nestCache.insert({cmd->expr(i).sessionid()*10000+cmd->expr(i).label(), cachedReq});
             auto kv = new struct nestKV(cmd->expr(i).sessionid()*10000+cmd->expr(i).label(), cachedReq);
@@ -1218,7 +1218,7 @@ void ReplayLocal(char** argv, int num_of_threads) {
       std::shared_ptr<JitCmdv2> cmdDone =  std::make_shared<JitCmdv2>();
       cmdDone->set_cmd(2);
       for(int i = 0 ;i < 1;i++) {
-        JitRequest* targetReq = cmdDone->add_expr();
+        AstNode* targetReq = cmdDone->add_expr();
         if (cmd->expr(i).direction() == 0) {
           targetReq->set_kind(rgd::LNot);
           targetReq->set_name("lnot");
