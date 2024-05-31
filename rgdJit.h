@@ -81,6 +81,7 @@ namespace rgd {
 
         if (!JTMB)
           return JTMB.takeError();
+        llvm::outs() << "Host triples: " << JTMB->getTargetTriple().str() << "\n";
 
         auto DL = JTMB->getDefaultDataLayoutForTarget();
         if (!DL)
@@ -109,7 +110,8 @@ namespace rgd {
         FPM->add(llvm::createInstructionCombiningPass());
         FPM->add(llvm::createReassociatePass());
         FPM->add(llvm::createGVNPass());
-        FPM->add(llvm::createCFGSimplificationPass());
+        FPM->add(llvm::createInstSimplifyLegacyPass());
+        // FPM->add(llvm::createCFGSimplificationPass());
         FPM->doInitialization();
 
         // Run the optimizations over all functions in the module being added to
